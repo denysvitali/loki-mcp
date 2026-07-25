@@ -12,7 +12,42 @@ import (
 	"github.com/kaiko-ai/loki-mcp/internal/telemetry"
 )
 
-// HandleQuery handles loki_query tool requests.
+// HandleQuery serves a loki_query tool call: it binds the request arguments
+// into LokiParams, ANDs the configured query filter into the client's LogQL,
+// runs a range query, post-processes the entries and renders them in the
+// requested format.
+//
+// Every failure is returned as a Go error with a nil result, never as an
+// mcp.CallToolResult with IsError set; mcp-go converts it. The failures are:
+// unbindable arguments, head and tail both positive (they are mutually
+// exclusive), an unmergeable or empty query when a filter is configured, an
+// unparseable start or end, the Loki call itself, and an unsupported format.
+//
+// What the configuration changes:
+//
+//   - Empty query filter (Config.QueryFilter nil or empty): the client's query
+//     string is sent to Loki byte for byte, without even being parsed. A
+//     non-empty filter forces a parse, so with a filter configured a
+//     syntactically invalid query fails here rather than at Loki, and an empty
+//     query is rejected outright.
+//   - Nil detector (secret filtering off): no line is scanned. If the call
+//     also passes no filter, head or tail, post-processing is skipped
+//     entirely and the response keeps Loki's own newest-first ordering and
+//     stream grouping. Otherwise — with a detector, or with any of filter,
+//     head or tail — entries are flattened, re-sorted *oldest first* and
+//     regrouped, so enabling secret filtering alone reverses the order of the
+//     lines and makes the order of the streams nondeterministic. That is
+//     pre-existing behaviour, reported in FINDINGS.md §4 and §5, not a
+//     property to rely on.
+//
+// When lines are withheld the count is reported twice over, by two channels
+// that do not overlap: appended to the rendered text for raw and text, and
+// added to the response's Warnings array for json. Neither format shows the
+// other's copy, and raw and text drop Loki's genuine warnings entirely
+// (FINDINGS.md §12).
+//
+// ctx bounds the Loki request and is polled by the secret scan; a cancelled
+// scan yields the lines checked so far rather than an error.
 func (h *Handlers) HandleQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var params LokiParams
 	if err := request.BindArguments(&params); err != nil {

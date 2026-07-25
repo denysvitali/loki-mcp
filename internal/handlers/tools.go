@@ -5,7 +5,18 @@ import (
 	"github.com/spf13/viper"
 )
 
-// QueryTool returns the loki_query tool definition.
+// QueryTool returns the loki_query tool schema, to be registered against
+// (*Handlers).HandleQuery. `query` is the only required argument; every other
+// argument is optional and falls back to the server's configuration.
+//
+// The schema is a snapshot, not a live view. The advertised default for `url`
+// is read from viper at the moment QueryTool is called, so it reflects
+// --url/LOKI_URL as resolved at registration time; changing them afterwards
+// does not update an already-registered tool. Nothing else in the schema
+// depends on configuration, and the configured query filter is deliberately
+// invisible here — clients cannot see or opt out of it.
+//
+// QueryTool ignores h and never fails; it is pure with respect to Config.
 func (h *Handlers) QueryTool() mcp.Tool {
 	lokiURL := viper.GetString("url")
 
@@ -59,7 +70,13 @@ func (h *Handlers) QueryTool() mcp.Tool {
 	)
 }
 
-// LabelNamesTool returns the loki_label_names tool definition.
+// LabelNamesTool returns the loki_label_names tool schema, to be registered
+// against (*Handlers).HandleLabelNames. It has no required arguments.
+//
+// The schema advertises no head, tail, filter or limit: label results are
+// returned whole and are never post-processed or secret-scanned. As in
+// QueryTool the `url` default is snapshotted from viper at call time, and
+// LabelNamesTool ignores h.
 func (h *Handlers) LabelNamesTool() mcp.Tool {
 	lokiURL := viper.GetString("url")
 
@@ -94,7 +111,12 @@ func (h *Handlers) LabelNamesTool() mcp.Tool {
 	)
 }
 
-// LabelValuesTool returns the loki_label_values tool definition.
+// LabelValuesTool returns the loki_label_values tool schema, to be registered
+// against (*Handlers).HandleLabelValues. `label` is the only required
+// argument.
+//
+// Otherwise identical to LabelNamesTool: no post-processing arguments, the
+// `url` default snapshotted from viper at call time, and h unused.
 func (h *Handlers) LabelValuesTool() mcp.Tool {
 	lokiURL := viper.GetString("url")
 

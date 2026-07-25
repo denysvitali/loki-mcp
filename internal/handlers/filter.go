@@ -8,8 +8,20 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 )
 
-// ParseFilter parses a LogQL stream selector and returns its matchers.
-// The filter must be a valid LogQL stream selector like {namespace="prod", job="api"}.
+// ParseFilter returns the label matchers of a LogQL stream selector such as
+// `{namespace="prod", job="api"}`, in the order they were written. The
+// matchers may use any LogQL operator: =, !=, =~ and !~ all round-trip.
+//
+// A filter that is empty or only whitespace returns (nil, nil), not an error.
+// Callers treat a nil matcher slice as "unrestricted", so a blank filter
+// disables filtering rather than matching nothing.
+//
+// Only *log* selectors parse. A pipeline is accepted but silently reduced to
+// its stream matchers: `{namespace="prod"} |= "error"` yields the single
+// matcher namespace="prod" and the line filter is discarded. A metric query
+// such as `rate({job="api"}[5m])` is rejected with "only log selector is
+// supported", as is any syntactically invalid selector; both come back wrapped
+// in an error quoting the input.
 func ParseFilter(filter string) ([]*labels.Matcher, error) {
 	filter = strings.TrimSpace(filter)
 	if filter == "" {
@@ -25,9 +37,33 @@ func ParseFilter(filter string) ([]*labels.Matcher, error) {
 	return expr.Matchers(), nil
 }
 
-// MergeQueryWithFilter injects filter matchers into a LogQL query.
-// The filter matchers are prepended to the query's stream selector,
-// effectively ANDing the filter with the original query.
+// MergeQueryWithFilter returns query with filterMatchers prepended to the
+// matchers of every stream selector it contains, which ANDs the filter into
+// the query. Merging `{namespace="prod"}` into `{job="api"} |= "error"` gives
+// `{namespace="prod", job="api"} |= "error"`.
+//
+// The result is re-rendered from the parsed AST, so it is normalised rather
+// than a textual splice: whitespace, quoting and operator spacing come out in
+// LogQL's canonical form even where the input differed. Callers must use the
+// returned string and must not assume it is the input with something inserted.
+//
+// Guarantees:
+//   - An empty filterMatchers returns query verbatim, without parsing it. An
+//     unrestricted server therefore never rejects a query this function could
+//     not parse; validation is Loki's job.
+//   - Otherwise an empty or whitespace-only query is an error. There is no
+//     "filter only" mode: the client must name something to query.
+//   - Every stream selector in the expression is rewritten, including both
+//     sides of a binary operation and the selectors nested inside range and
+//     vector aggregations, so no branch of the query can escape the filter.
+//
+// Supported LogQL shapes are exactly the AST node types injectMatchers
+// handles: plain selectors, pipelines, log ranges, range and vector
+// aggregations, binary operations, label_replace, and literals (returned
+// unchanged). Any other expression type is refused with "unsupported
+// expression type: %T" rather than being passed through unfiltered — failing
+// closed is deliberate, because passing it through would leak logs the filter
+// exists to hide.
 func MergeQueryWithFilter(query string, filterMatchers []*labels.Matcher) (string, error) {
 	if len(filterMatchers) == 0 {
 		return query, nil
@@ -203,8 +239,6 @@ func injectLabelReplace(e *syntax.LabelReplaceExpr, filterMatchers []*labels.Mat
 
 // mergeMatchersExpr creates a new MatchersExpr with filter matchers prepended.
 func mergeMatchersExpr(expr *syntax.MatchersExpr, filterMatchers []*labels.Matcher) *syntax.MatchersExpr {
-	// Combine filter matchers with existing matchers
-	// Filter matchers come first, then original matchers
 	allMatchers := make([]*labels.Matcher, 0, len(filterMatchers)+len(expr.Mts))
 	allMatchers = append(allMatchers, filterMatchers...)
 	allMatchers = append(allMatchers, expr.Mts...)
@@ -212,8 +246,18 @@ func mergeMatchersExpr(expr *syntax.MatchersExpr, filterMatchers []*labels.Match
 	return &syntax.MatchersExpr{Mts: allMatchers}
 }
 
-// BuildFilterSelector builds a LogQL stream selector string from matchers.
-// This is useful for label API calls that accept a query parameter.
+// BuildFilterSelector renders matchers as a LogQL stream selector —
+// `{namespace="prod", job=~"api.*"}` — preserving their order and each
+// matcher's own operator. It is the inverse of ParseFilter for any selector
+// ParseFilter accepted, in the sense that re-parsing the result yields an
+// equivalent matcher list, though not necessarily the original spelling.
+//
+// An empty or nil matchers returns "", not "{}". Callers pass the result
+// straight to Loki's label endpoints as the optional `query` parameter, where
+// "" means "omit the parameter" and "{}" would be a selector error.
+//
+// The output is not escaped by this function; it relies on
+// (*labels.Matcher).String, which quotes and escapes the value itself.
 func BuildFilterSelector(matchers []*labels.Matcher) string {
 	if len(matchers) == 0 {
 		return ""

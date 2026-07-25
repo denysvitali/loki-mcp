@@ -12,7 +12,18 @@ import (
 	"github.com/grafana/loki/v3/pkg/loghttp"
 )
 
-// LokiHTTPClient provides HTTP access to Loki API endpoints that support query filtering.
+// LokiHTTPClient talks to Loki's two label endpoints directly, over plain
+// HTTP, because the logcli client this codebase otherwise uses cannot send the
+// `query` parameter those endpoints accept. It exists for exactly that reason
+// and is used only when a query filter is configured; it does not implement
+// query_range and is not a general-purpose Loki client.
+//
+// Every request is bounded by DefaultHTTPTimeout (30s) end to end, including
+// connection setup and reading the body, on top of whatever deadline the
+// caller's context carries. Whichever fires first wins.
+//
+// A LokiHTTPClient is immutable after NewLokiHTTPClient and its methods are
+// safe for concurrent use, as is the *http.Client inside it.
 type LokiHTTPClient struct {
 	baseURL     string
 	username    string
@@ -22,7 +33,19 @@ type LokiHTTPClient struct {
 	httpClient  *http.Client
 }
 
-// NewLokiHTTPClient creates a new Loki HTTP client.
+// NewLokiHTTPClient returns a client that copies its address and credentials
+// out of params; later changes to params do not affect it. It allocates a
+// dedicated http.Client with a DefaultHTTPTimeout timeout, so clients are
+// cheap but do not share a connection pool — one per request is the current
+// usage and is intentional.
+//
+// params.URL is not validated here. A malformed URL surfaces as "invalid base
+// URL" from the first method call, not from this constructor, which never
+// fails and never touches the network. Credentials are optional: basic auth is
+// sent only when both Username and Password are set, a bearer token only when
+// Token is set, and X-Scope-OrgID only when Org is set. Setting both Password
+// and Token sends both headers, with the bearer token overwriting the basic
+// Authorization header.
 func NewLokiHTTPClient(params *LokiParams) *LokiHTTPClient {
 	return &LokiHTTPClient{
 		baseURL:     params.URL,
@@ -36,12 +59,29 @@ func NewLokiHTTPClient(params *LokiParams) *LokiHTTPClient {
 	}
 }
 
-// ListLabelNamesWithQuery fetches label names from Loki with an optional query filter.
+// ListLabelNamesWithQuery GETs /loki/api/v1/labels and decodes the response.
+// query is an optional LogQL stream selector restricting which labels are
+// returned; "" omits the parameter entirely. start and end are sent as
+// nanosecond Unix timestamps.
+//
+// Any status other than 200 is an error whose message includes the status code
+// and the response body, so Loki's own explanation reaches the caller. A
+// transport failure, a body that is not a LabelResponse, and a base URL that
+// will not parse are likewise errors. On success the returned pointer is
+// always non-nil, though its Data may be empty.
 func (c *LokiHTTPClient) ListLabelNamesWithQuery(ctx context.Context, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
 	return c.fetchLabels(ctx, "/loki/api/v1/labels", query, start, end)
 }
 
-// ListLabelValuesWithQuery fetches values for a specific label with an optional query filter.
+// ListLabelValuesWithQuery GETs /loki/api/v1/label/<name>/values for a single
+// label. It has the same contract as ListLabelNamesWithQuery: optional query
+// selector, nanosecond timestamps, and non-200 responses turned into errors
+// carrying the status and the body.
+//
+// labelName is percent-escaped into the path and then escaped a second time
+// when the URL is rendered, so a name containing a character that needs
+// escaping is sent doubly encoded (FINDINGS.md §10). Real Loki label names are
+// [a-zA-Z_][a-zA-Z0-9_]*, so nothing that needs escaping normally gets here.
 func (c *LokiHTTPClient) ListLabelValuesWithQuery(ctx context.Context, labelName, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
 	path := fmt.Sprintf("/loki/api/v1/label/%s/values", url.PathEscape(labelName))
 	return c.fetchLabels(ctx, path, query, start, end)
@@ -91,7 +131,9 @@ func (c *LokiHTTPClient) fetchLabels(ctx context.Context, path, query string, st
 	return &result, nil
 }
 
-// addAuthHeaders adds authentication headers to the request.
+// addAuthHeaders sets basic auth (only when both username and password are
+// present), the bearer token, and X-Scope-OrgID, skipping each when its value
+// is empty. A bearer token overwrites the Authorization header basic auth set.
 func (c *LokiHTTPClient) addAuthHeaders(req *http.Request) {
 	if c.username != "" && c.password != "" {
 		req.SetBasicAuth(c.username, c.password)

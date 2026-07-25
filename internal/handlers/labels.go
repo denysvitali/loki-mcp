@@ -17,7 +17,24 @@ type labelFetcher func(ctx context.Context, params *LokiParams, filter []*labels
 // labelFormatter renders a label response using the client's requested format.
 type labelFormatter func(params *LokiParams, result *loghttp.LabelResponse) (string, error)
 
-// HandleLabelNames handles loki_label_names tool requests.
+// HandleLabelNames serves a loki_label_names tool call, returning the label
+// names Loki knows about in the resolved time window, rendered in the
+// requested format.
+//
+// Failures come back as a Go error with a nil result: unbindable arguments, an
+// unparseable start or end, the Loki call (wrapped in "labels query execution
+// failed"), or an unsupported format. An empty result is not an error; it
+// renders as "No labels found".
+//
+// With an empty query filter the request goes out through the logcli client
+// with no selector, so it returns every label in the window. With a filter
+// configured it goes out through LokiHTTPClient instead, carrying the filter
+// as the endpoint's `query` parameter, because the logcli client cannot send
+// one — so the filter genuinely restricts the names returned.
+//
+// The detector is irrelevant here. Label names are never secret-scanned, and
+// neither head, tail, filter nor limit applies; whatever Loki returns is
+// returned.
 func (h *Handlers) HandleLabelNames(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return h.runLabelRequest(ctx, request, "labels query execution failed", fetchLabelNames,
 		func(params *LokiParams, result *loghttp.LabelResponse) (string, error) {
@@ -25,7 +42,18 @@ func (h *Handlers) HandleLabelNames(ctx context.Context, request mcp.CallToolReq
 		})
 }
 
-// HandleLabelValues handles loki_label_values tool requests.
+// HandleLabelValues serves a loki_label_values tool call, returning the values
+// of the single label named by the `label` argument.
+//
+// It behaves exactly as HandleLabelNames — same error contract, same
+// filter-selects-the-client rule, no secret scanning, no head/tail/limit —
+// with two differences: the fetch failure is wrapped in "label values query
+// execution failed", and an empty result renders as "No values found for
+// label '<name>'".
+//
+// An empty `label` is not rejected here. The schema marks it required, so
+// enforcement is the MCP layer's; if one reaches this function it is passed to
+// Loki as an empty label name and Loki decides.
 func (h *Handlers) HandleLabelValues(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return h.runLabelRequest(ctx, request, "label values query execution failed", fetchLabelValues,
 		func(params *LokiParams, result *loghttp.LabelResponse) (string, error) {

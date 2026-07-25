@@ -9,18 +9,36 @@ import (
 	"github.com/grafana/loki/v3/pkg/loghttp"
 )
 
-// Format is the output format requested by a tool call. It stays a plain string
-// on the wire; LokiParams.Format holds the raw client value.
+// Format is the output format requested by a tool call. It stays a plain
+// string on the wire; LokiParams.Format holds the unvalidated client value and
+// is converted here.
+//
+// Conversion is not validation. Format("yaml") is a perfectly good value of
+// this type; only validate rejects it, and the formatters call validate late —
+// after the empty-result and non-stream branches — so an unsupported format
+// can still produce output rather than an error. See formatLokiResults.
 type Format string
 
-// Supported output formats.
+// The three supported output formats. Anything else is rejected by validate
+// with an error naming all three. There is no default constant: an empty
+// Format is invalid, and "raw" is substituted upstream by
+// (*LokiParams).applyDefaults, not here.
 const (
-	FormatRaw  Format = "raw"
+	// FormatRaw is one line per entry, "<timestamp> [<labels> ]<line>". It is
+	// what a client gets when it asks for nothing.
+	FormatRaw Format = "raw"
+	// FormatJSON is the decoded Loki response re-marshalled with two-space
+	// indentation. It is *not* Loki's wire format and does not round-trip
+	// back through a Loki-aware parser (FINDINGS.md §6); it is also the only
+	// format that surfaces the response's Warnings.
 	FormatJSON Format = "json"
+	// FormatText is a numbered, per-stream listing intended for a human
+	// reader.
 	FormatText Format = "text"
 )
 
-// validate reports whether f is one of the supported formats.
+// validate returns nil when f is one of the three supported formats, and
+// otherwise an error naming f and listing them.
 func (f Format) validate() error {
 	switch f {
 	case FormatRaw, FormatJSON, FormatText:

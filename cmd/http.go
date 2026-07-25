@@ -8,7 +8,6 @@ import (
 	"github.com/kaiko-ai/loki-mcp/internal/server"
 )
 
-// httpCmd represents the http command
 var httpCmd = &cobra.Command{
 	Use:   "http",
 	Short: "Run the MCP server in HTTP mode",

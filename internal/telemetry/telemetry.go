@@ -33,10 +33,23 @@ import (
 
 const instrumentationName = "github.com/kaiko-ai/loki-mcp"
 
-// Config controls OpenTelemetry setup.
+// Config is everything Initialize takes that does not come from the
+// environment. Exporter selection, endpoints, protocols, headers and sampling
+// are all read from the standard OTEL_* variables instead, so this struct
+// stays two fields.
+//
+// The zero Config is valid: it installs OTLP providers if the OTEL_*
+// environment asks for them and nothing otherwise.
 type Config struct {
+	// ServiceVersion becomes the service.version resource attribute on every
+	// span, metric and log record. "" is allowed and yields an empty
+	// attribute rather than an error.
 	ServiceVersion string
-	Stderr         bool
+	// Stderr adds console exporters for all three signals, writing to
+	// os.Stderr. Never stdout: under the stdio transport stdout carries the
+	// MCP protocol. It is additive — with OTLP also configured, both
+	// exporters receive everything.
+	Stderr bool
 }
 
 var (
@@ -63,7 +76,35 @@ type instruments struct {
 	secretLinesFiltered metric.Int64Counter
 }
 
-// Initialize configures OpenTelemetry providers and instruments.
+// Initialize builds the metric instruments and, when the environment asks for
+// it, installs OpenTelemetry providers as the global tracer, meter and logger
+// providers, registering their Shutdown functions for a later Shutdown call.
+//
+// It is not required. StartSpan, ToolHandlerMiddleware and RecordSecretFiltering
+// all work without it — they fall back to OpenTelemetry's global no-op
+// providers — so nothing in this package needs a "did you call Initialize"
+// guard.
+//
+// A provider is installed for a signal only if an exporter is configured for
+// it, which means either cfg.Stderr, or an OTEL_*_EXPORTER variable for that
+// signal, or one of the OTLP endpoint/protocol/headers variables (generic or
+// per-signal). Signals are decided independently: traces to a collector with
+// metrics off is a normal outcome. With none of those set, Initialize builds
+// the instruments, installs nothing, registers no shutdown function and
+// returns nil.
+//
+// OTEL_SDK_DISABLED set to true, 1 or yes short-circuits everything after the
+// instruments: no provider is built even if cfg.Stderr is set, and nil is
+// returned.
+//
+// Errors are collected, not fatal. A failing exporter is joined into the
+// returned error while the providers that did build are still installed, so a
+// non-nil return does not mean telemetry is off, and the caller may keep
+// running. Instrument creation errors are logged rather than returned.
+//
+// Calling Initialize twice replaces the global providers and appends a second
+// set of shutdown functions; it is meant to run once, at startup, before any
+// goroutine records anything.
 func Initialize(ctx context.Context, cfg Config) error {
 	initInstruments()
 
@@ -203,12 +244,41 @@ func newLoggerProvider(ctx context.Context, res *resource.Resource, cfg Config) 
 	return sdklog.NewLoggerProvider(options...), errors.Join(errs...)
 }
 
-// NewLogrusHook bridges logrus records into the configured OpenTelemetry logger.
+// NewLogrusHook returns a logrus hook that mirrors every record it sees into
+// the OpenTelemetry logger provider that is global at the time the record is
+// emitted, not at the time of this call. Registering it before Initialize is
+// therefore fine, and is what cmd does.
+//
+// It never replaces stderr output: records still go to the logrus writer as
+// well. Without a logger provider installed the hook resolves to a no-op, so
+// registering it in a process with no OTLP configuration costs a lookup per
+// record and nothing else.
+//
+// version is recorded as the instrumentation scope version. The hook is safe
+// for concurrent use, fires synchronously on the logging goroutine, and cannot
+// be removed once added.
 func NewLogrusHook(version string) logrus.Hook {
 	return otellogrus.NewHook(instrumentationName, otellogrus.WithVersion(version))
 }
 
-// Shutdown flushes and shuts down configured providers.
+// Shutdown flushes and stops every provider Initialize installed, in reverse
+// order of registration, and joins whatever errors they report.
+//
+// It drains the registry rather than setting a flag: the pending functions are
+// taken out under the lock and the registry is left empty, so a second call is
+// a no-op returning nil, and two concurrent calls cannot shut the same
+// provider down twice. It is idempotent in that sense only — a later
+// Initialize repopulates the registry, so Shutdown will do real work again.
+//
+// Shutdown never uninstalls the global providers. After it returns, StartSpan
+// and the recording helpers still work; they just record into providers that
+// have stopped exporting. This is deliberate — it keeps shutdown-path code
+// from having to nil-check anything.
+//
+// ctx bounds the flush. The callers pass a 5s timeout: long enough for a
+// healthy collector, short enough not to hang the CLI on an unreachable one.
+// A deadline that expires comes back as an error and the process should still
+// exit.
 func Shutdown(ctx context.Context) error {
 	shutdownMu.Lock()
 	fns := shutdowns
@@ -224,12 +294,37 @@ func Shutdown(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// StartSpan starts a span with the package tracer.
+// StartSpan starts a span named name on this module's tracer, as a child of
+// whatever span ctx carries, and returns the derived context alongside it.
+//
+// The caller owns the span and must End it; nothing here does. Use the
+// returned context for the work being measured, or the child span will attach
+// to the wrong parent.
+//
+// It works before Initialize and after Shutdown. With no tracer provider
+// installed the global no-op provider returns a non-recording span, which is
+// safe to use and to End, so callers never need to check for nil.
 func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	return otel.Tracer(instrumentationName).Start(ctx, name, trace.WithAttributes(attrs...))
 }
 
-// ToolHandlerMiddleware records spans and metrics for MCP tool calls.
+// ToolHandlerMiddleware returns middleware that wraps every MCP tool call in a
+// span named "mcp.tool.<tool>" and records two metrics against it:
+// loki_mcp_tool_requests_total and loki_mcp_tool_duration_seconds, both
+// labelled with the tool name and an error boolean.
+//
+// It is transparent. The wrapped handler's result and error are returned
+// unchanged, the middleware neither retries nor swallows anything, and the
+// handler receives the span-carrying context so anything it starts nests
+// correctly.
+//
+// A call counts as an error if the handler returned a non-nil error *or* a
+// result with IsError set; only the Go error is also recorded on the span with
+// RecordError. The span is ended before the metrics are recorded, so the
+// duration excludes the metric write itself.
+//
+// Safe before Initialize: with no instruments stored yet the metric writes are
+// skipped and only the (no-op) span is produced. Safe for concurrent calls.
 func ToolHandlerMiddleware() mcpserver.ToolHandlerMiddleware {
 	return func(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -264,7 +359,17 @@ func ToolHandlerMiddleware() mcpserver.ToolHandlerMiddleware {
 	}
 }
 
-// RecordSecretFiltering records secret detection and omission metrics.
+// RecordSecretFiltering adds findings to loki_mcp_secret_findings_total and
+// lines to loki_mcp_secret_lines_filtered_total. Each is skipped unless
+// positive, so a call with two zeros records nothing and is not an error.
+//
+// The two counters carry no attributes — not the tool name, not the query — on
+// purpose: this is the one metric path that sees secret-bearing data, and
+// nothing derived from a matched line is allowed onto it. Correlation is via
+// the ambient span in ctx, which is otherwise unused here.
+//
+// Safe before Initialize and after Shutdown: with no instruments stored the
+// call returns immediately. Safe for concurrent calls.
 func RecordSecretFiltering(ctx context.Context, findings, lines int) {
 	inst := currentInstruments.Load()
 	if inst == nil {

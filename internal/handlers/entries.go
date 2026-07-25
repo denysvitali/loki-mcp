@@ -9,7 +9,17 @@ import (
 	"github.com/grafana/loki/v3/pkg/loghttp"
 )
 
-// parseTime parses a time string in various formats
+// parseTime accepts, in order: the literal "now"; a negative Go duration such
+// as "-1h" or "-30m", resolved against the present moment; RFC3339; and then
+// "2006-01-02T15:04:05", "2006-01-02 15:04:05" and "2006-01-02".
+//
+// Only RFC3339 carries a zone. The three fallback layouts have none, so
+// time.Parse reads them as UTC — a client that writes a local wall-clock time
+// without an offset gets a UTC instant, silently shifted.
+//
+// A leading "-" that is not a valid duration is not an error; it falls through
+// to the layout attempts. Anything none of them accepts returns "unsupported
+// time format: <input>".
 func parseTime(timeStr string) (time.Time, error) {
 	// Handle "now" keyword
 	if timeStr == "now" {
@@ -96,7 +106,14 @@ func filterEntries(entries []logEntry, filter string, caseSensitive bool) []logE
 	return filtered
 }
 
-// applyHeadTail returns the first N entries (head) or last N entries (tail)
+// applyHeadTail returns the first head entries or the last tail entries,
+// against the ascending order collectAndSortEntries produced — so head is the
+// oldest and tail the newest. A count at or above len(entries), or a
+// non-positive one, returns entries unchanged, and the result always aliases
+// the input slice rather than copying.
+//
+// head wins if both are positive. The query handler rejects that combination
+// before it gets here, so the precedence is a fallback, not a contract.
 func applyHeadTail(entries []logEntry, head, tail int) []logEntry {
 	if len(entries) == 0 {
 		return entries
@@ -119,8 +136,13 @@ func applyHeadTail(entries []logEntry, head, tail int) []logEntry {
 	return entries
 }
 
-// entriesToStreams converts a slice of logEntry back to loghttp.Streams format
-// Entries are grouped by their labels
+// entriesToStreams converts a slice of logEntry back to loghttp.Streams
+// format, grouping entries by their label set and preserving the entry order
+// within each stream.
+//
+// The order of the streams themselves is nondeterministic: they are emitted by
+// ranging a map, and Go randomises map iteration. Two identical queries can
+// return the same streams in different orders (FINDINGS.md §5).
 func entriesToStreams(entries []logEntry) loghttp.Streams {
 	if len(entries) == 0 {
 		return loghttp.Streams{}
@@ -148,7 +170,6 @@ func entriesToStreams(entries []logEntry) loghttp.Streams {
 		}
 	}
 
-	// Convert map to slice
 	var streams loghttp.Streams
 	for _, stream := range streamMap {
 		streams = append(streams, *stream)

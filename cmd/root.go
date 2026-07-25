@@ -41,7 +41,15 @@ func envBoolFlag(fs *pflag.FlagSet, name, shorthand string, def bool, usage stri
 	_ = viper.BindPFlag(name, fs.Lookup(name))
 }
 
-// Version is set via ldflags at build time
+// Version is the version string this binary reports: to `loki-mcp version`, to
+// MCP clients as the server version, and to OpenTelemetry as service.version.
+//
+// It is not set by ldflags. -ldflags sets main.version; main assigns it here
+// before calling Execute, so this variable is authoritative only after that
+// assignment. A binary built without ldflags — `go build`, `make build`, `go
+// test` — reports "dev".
+//
+// Write it once, from main, before Execute. Nothing synchronises it.
 var Version = "dev"
 
 // Configure viper at package-init time (before any file's init() registers
@@ -53,7 +61,10 @@ var _ = func() bool {
 	return true
 }()
 
-// rootCmd represents the base command when called without any subcommands
+// rootCmd carries the persistent flags and the startup hook shared by every
+// subcommand. It has no Run of its own, so a bare `loki-mcp` prints help and
+// exits 0 without starting a server (FINDINGS.md §1) — and, because cobra
+// skips a non-runnable root's PersistentPreRunE, without pinging Loki either.
 var rootCmd = &cobra.Command{
 	Use:   "loki-mcp",
 	Short: "MCP server for Grafana Loki",
@@ -147,7 +158,20 @@ func pingLoki() error {
 	return nil
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
+// Execute runs the command tree against os.Args and is the whole body of
+// main. Subcommands are registered by each file's init(), not here.
+//
+// It either returns normally, having run a subcommand that succeeded, or exits
+// the process with status 1. It never returns an error, and a failing
+// subcommand's own cleanup — telemetry flushing in particular — has already
+// run by then, because it happens in deferred calls inside the Run* functions
+// rather than out here.
+//
+// Cobra prints the error and the full usage block on failure; SilenceUsage is
+// not set, so even a runtime failure like an unreachable Loki produces a usage
+// dump (FINDINGS.md §3).
+//
+// Call it once, from the main goroutine.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
