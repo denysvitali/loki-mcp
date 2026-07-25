@@ -38,10 +38,13 @@ func init() {
 
 	envFlag(httpCmd.Flags(), "host", "", "0.0.0.0", "HTTP server bind address")
 
-	httpCmd.Flags().Bool("disable-sse", false, "Disable legacy SSE endpoints (/sse, /mcp) [env: LOKI_DISABLE_SSE]")
-	_ = viper.BindPFlag("disable-sse", httpCmd.Flags().Lookup("disable-sse"))
+	envBoolFlag(httpCmd.Flags(), "disable-sse", "", false,
+		"Disable legacy SSE endpoints (/sse, /mcp)")
 
 	// PORT (without LOKI_ prefix) is the conventional env var for HTTP port.
+	// It is registered by hand because envFlag would document it as
+	// LOKI_PORT. Note that LOKI_PORT does resolve too, and outranks PORT:
+	// viper checks AutomaticEnv before any explicit BindEnv.
 	httpCmd.Flags().StringP("port", "p", "8080", "HTTP server port [env: PORT]")
 	_ = viper.BindPFlag("port", httpCmd.Flags().Lookup("port"))
 	_ = viper.BindEnv("port", "PORT")
