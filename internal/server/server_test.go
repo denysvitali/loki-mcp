@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -120,18 +121,53 @@ func freePort(t *testing.T) string {
 	return port
 }
 
-func waitForServer(t *testing.T, addr string) {
-	t.Helper()
+// waitForServer reports whether addr accepts connections before the deadline,
+// giving up early if the server goroutine has already failed.
+func waitForServer(addr string, errCh <-chan error) error {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			return fmt.Errorf("server exited before listening: %w", err)
+		default:
+		}
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
-			return
+			return nil
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("server at %s did not start listening", addr)
+	return fmt.Errorf("server at %s did not start listening", addr)
+}
+
+// startRunHTTP starts RunHTTP on a free port and returns once it is listening.
+//
+// freePort can only reserve a port by closing its listener, so another process
+// may take it in between. That is a property of RunHTTP's string port
+// parameter, not a bug worth changing production code for, so retry a few
+// times instead.
+func startRunHTTP(t *testing.T, disableSSE bool) (addr string, errCh chan error) {
+	t.Helper()
+	const attempts = 5
+	for i := range attempts {
+		port := freePort(t)
+		addr = "127.0.0.1:" + port
+		errCh = make(chan error, 1)
+		go func() {
+			errCh <- RunHTTP("test-version", HTTPConfig{
+				Host:       "127.0.0.1",
+				Port:       port,
+				DisableSSE: disableSSE,
+			}, handlers.Config{})
+		}()
+		if err := waitForServer(addr, errCh); err == nil {
+			return addr, errCh
+		} else if i == attempts-1 {
+			t.Fatalf("RunHTTP never came up in %d attempts: %v", attempts, err)
+		}
+	}
+	panic("unreachable")
 }
 
 // TestRunHTTP pins the observable behaviour of the current RunHTTP: endpoint
@@ -148,18 +184,7 @@ func TestRunHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			port := freePort(t)
-			addr := "127.0.0.1:" + port
-
-			errCh := make(chan error, 1)
-			go func() {
-				errCh <- RunHTTP("test-version", HTTPConfig{
-					Host:       "127.0.0.1",
-					Port:       port,
-					DisableSSE: tt.disableSSE,
-				}, handlers.Config{})
-			}()
-			waitForServer(t, addr)
+			addr, errCh := startRunHTTP(t, tt.disableSSE)
 
 			// Bogus POST to /stream must produce an HTTP-level MCP error
 			// response, not a panic or a hang.
