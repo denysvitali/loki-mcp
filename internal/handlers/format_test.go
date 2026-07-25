@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/grafana/loki/v3/pkg/loghttp"
+	"github.com/prometheus/prometheus/model/labels"
 )
 
 const unsupportedFormatErr = "unsupported format: xml. Supported formats: raw, json, text"
@@ -354,6 +356,170 @@ func TestFormatLokiResults_JSONIndent(t *testing.T) {
 	}
 	if !strings.Contains(got, "\n  \"status\": \"success\"") {
 		t.Errorf("expected two-space indented JSON, got:\n%s", got)
+	}
+}
+
+// TestFormatLokiResults_JSONWireShape pins the json output byte for byte. The
+// shape is Loki's own query-range response: entries are ["<unix-nanos>",
+// "<line>"] tuples, not Go structs, and the never-recomputed "stats" block is
+// dropped.
+func TestFormatLokiResults_JSONWireShape(t *testing.T) {
+	t.Parallel()
+
+	got, err := formatLokiResults(streamsResponse(), "json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{
+  "status": "success",
+  "data": {
+    "resultType": "streams",
+    "result": [
+      {
+        "stream": {
+          "job": "test-job"
+        },
+        "values": [
+          [
+            "1705314645000000000",
+            "hello"
+          ]
+        ]
+      }
+    ]
+  }
+}`
+	if got != want {
+		t.Errorf("formatLokiResults(json) =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestFormatLokiResults_JSONRoundTrip proves the json output parses back
+// through the Loki client's own decoder with every stream, label, timestamp and
+// line intact. Re-marshalling the loghttp structs directly does not: they
+// define UnmarshalJSON but no MarshalJSON (FINDINGS.md §6).
+func TestFormatLokiResults_JSONRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	metadata := labels.FromStrings("trace_id", "0242ac120002")
+	parsed := labels.FromStrings("msg", "text")
+
+	original := &loghttp.QueryResponse{
+		Status:   "success",
+		Warnings: []string{"a genuine warning from Loki"},
+		Data: loghttp.QueryResponseData{
+			ResultType: loghttp.ResultTypeStream,
+			Result: loghttp.Streams{
+				{
+					Labels: loghttp.LabelSet{"job": "api", "level": "info"},
+					Entries: []loghttp.Entry{
+						{Timestamp: time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC), Line: "one"},
+						{
+							Timestamp:          time.Date(2024, 1, 15, 10, 0, 1, 500, time.UTC),
+							Line:               "two \"quoted\" and\nnewlined",
+							StructuredMetadata: metadata,
+							Parsed:             parsed,
+						},
+					},
+				},
+				{Labels: loghttp.LabelSet{"job": "web"}, Entries: []loghttp.Entry{}},
+			},
+		},
+	}
+
+	encoded, err := formatLokiResults(original, "json")
+	if err != nil {
+		t.Fatalf("formatLokiResults(json) unexpected error: %v", err)
+	}
+
+	var decoded loghttp.QueryResponse
+	if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("round trip failed: %v\noutput was:\n%s", err, encoded)
+	}
+
+	assertRoundTripped(t, original, &decoded)
+}
+
+// assertRoundTripped compares a decoded response against the one that was
+// encoded, field by field, so a mismatch names what was lost.
+func assertRoundTripped(t *testing.T, want, got *loghttp.QueryResponse) {
+	t.Helper()
+
+	if got.Status != want.Status {
+		t.Errorf("status = %q, want %q", got.Status, want.Status)
+	}
+	if got.Data.ResultType != want.Data.ResultType {
+		t.Errorf("resultType = %q, want %q", got.Data.ResultType, want.Data.ResultType)
+	}
+	if len(got.Warnings) != len(want.Warnings) || (len(want.Warnings) > 0 && got.Warnings[0] != want.Warnings[0]) {
+		t.Errorf("warnings = %q, want %q", got.Warnings, want.Warnings)
+	}
+
+	wantStreams := want.Data.Result.(loghttp.Streams)
+	gotStreams, ok := got.Data.Result.(loghttp.Streams)
+	if !ok {
+		t.Fatalf("decoded result type = %T, want loghttp.Streams", got.Data.Result)
+	}
+	if len(gotStreams) != len(wantStreams) {
+		t.Fatalf("decoded %d streams, want %d", len(gotStreams), len(wantStreams))
+	}
+
+	for i, wantStream := range wantStreams {
+		gotStream := gotStreams[i]
+		if gotStream.Labels.String() != wantStream.Labels.String() {
+			t.Errorf("stream %d labels = %s, want %s", i, gotStream.Labels, wantStream.Labels)
+		}
+		if len(gotStream.Entries) != len(wantStream.Entries) {
+			t.Errorf("stream %d has %d entries, want %d", i, len(gotStream.Entries), len(wantStream.Entries))
+			continue
+		}
+		for j, wantEntry := range wantStream.Entries {
+			assertEntryRoundTripped(t, i, j, wantEntry, gotStream.Entries[j])
+		}
+	}
+}
+
+// assertEntryRoundTripped compares one decoded entry against the encoded one.
+func assertEntryRoundTripped(t *testing.T, stream, index int, want, got loghttp.Entry) {
+	t.Helper()
+
+	if !got.Timestamp.Equal(want.Timestamp) {
+		t.Errorf("stream %d entry %d timestamp = %s, want %s", stream, index, got.Timestamp, want.Timestamp)
+	}
+	if got.Line != want.Line {
+		t.Errorf("stream %d entry %d line = %q, want %q", stream, index, got.Line, want.Line)
+	}
+	if gotMeta, wantMeta := got.StructuredMetadata.String(), want.StructuredMetadata.String(); gotMeta != wantMeta {
+		t.Errorf("stream %d entry %d structured metadata = %s, want %s", stream, index, gotMeta, wantMeta)
+	}
+	if gotParsed, wantParsed := got.Parsed.String(), want.Parsed.String(); gotParsed != wantParsed {
+		t.Errorf("stream %d entry %d parsed labels = %s, want %s", stream, index, gotParsed, wantParsed)
+	}
+}
+
+// TestFormatLokiResults_JSONEmptyStreamValues pins that a stream with no
+// entries marshals as [] rather than the null the loghttp structs produced.
+func TestFormatLokiResults_JSONEmptyStreamValues(t *testing.T) {
+	t.Parallel()
+
+	result := &loghttp.QueryResponse{
+		Status: "success",
+		Data: loghttp.QueryResponseData{
+			ResultType: loghttp.ResultTypeStream,
+			Result:     loghttp.Streams{{Labels: loghttp.LabelSet{"job": "api"}}},
+		},
+	}
+
+	got, err := formatLokiResults(result, "json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, `"values": []`) {
+		t.Errorf("expected an empty values array, got:\n%s", got)
+	}
+	if strings.Contains(got, "null") {
+		t.Errorf("expected no nulls in the wire output, got:\n%s", got)
 	}
 }
 

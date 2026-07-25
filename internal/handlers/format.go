@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,10 +28,13 @@ const (
 	// FormatRaw is one line per entry, "<timestamp> [<labels> ]<line>". It is
 	// what a client gets when it asks for nothing.
 	FormatRaw Format = "raw"
-	// FormatJSON is the decoded Loki response re-marshalled with two-space
-	// indentation. It is *not* Loki's wire format and does not round-trip
-	// back through a Loki-aware parser (FINDINGS.md §6); it is also the only
-	// format that surfaces the response's Warnings.
+	// FormatJSON is Loki's own query-range wire format, two-space indented:
+	// the response is re-encoded from a dedicated DTO rather than from the
+	// loghttp structs (which decode but do not encode), so the output parses
+	// back through loghttp.QueryResponse.UnmarshalJSON. Metric queries
+	// (matrix/vector/scalar) are the exception — they still marshal the
+	// loghttp structs and do not round-trip. It is also the only format that
+	// surfaces the response's Warnings.
 	FormatJSON Format = "json"
 	// FormatText is a numbered, per-stream listing intended for a human
 	// reader.
@@ -58,6 +62,95 @@ func marshalIndentJSON(v any) (string, error) {
 	return string(jsonBytes), nil
 }
 
+// lokiStreamsResponse is the JSON shape Loki's query-range endpoint returns for
+// a streams result. It exists because loghttp.QueryResponse, loghttp.Stream and
+// loghttp.Entry define UnmarshalJSON but no MarshalJSON and carry no struct
+// tags: re-encoding them yields Go-shaped JSON that no Loki-aware parser
+// accepts. Marshalling this DTO instead round-trips through
+// loghttp.QueryResponse.UnmarshalJSON.
+//
+// Loki's "stats" block is deliberately omitted: post-processing (secret
+// filtering, head/tail, the keyword filter) invalidates it and it is never
+// recomputed, so emitting the decoded zero value would be a lie. The field is
+// optional on the wire.
+type lokiStreamsResponse struct {
+	Status   string          `json:"status"`
+	Warnings []string        `json:"warnings,omitempty"`
+	Data     lokiStreamsData `json:"data"`
+}
+
+type lokiStreamsData struct {
+	ResultType string           `json:"resultType"`
+	Result     []lokiWireStream `json:"result"`
+}
+
+// lokiWireStream is one element of the "result" array: the stream's label set
+// and its entries as [timestamp, line] tuples.
+type lokiWireStream struct {
+	Stream map[string]string `json:"stream"`
+	Values [][]any           `json:"values"`
+}
+
+// newLokiStreamsResponse builds the wire DTO for a streams result. streams is
+// passed separately because the caller has already type-asserted it out of
+// result.Data.Result.
+func newLokiStreamsResponse(result *loghttp.QueryResponse, streams loghttp.Streams) lokiStreamsResponse {
+	resultType := string(result.Data.ResultType)
+	if resultType == "" {
+		resultType = loghttp.ResultTypeStream
+	}
+
+	values := make([]lokiWireStream, 0, len(streams))
+	for _, stream := range streams {
+		values = append(values, newLokiWireStream(stream))
+	}
+
+	return lokiStreamsResponse{
+		Status:   result.Status,
+		Warnings: result.Warnings,
+		Data: lokiStreamsData{
+			ResultType: resultType,
+			Result:     values,
+		},
+	}
+}
+
+// newLokiWireStream converts one decoded stream. Both maps and slices are
+// allocated rather than aliased-when-nil so that an empty stream marshals as
+// {} and [] instead of null, matching Loki.
+func newLokiWireStream(stream loghttp.Stream) lokiWireStream {
+	labelSet := make(map[string]string, len(stream.Labels))
+	for name, value := range stream.Labels {
+		labelSet[name] = value
+	}
+
+	entries := make([][]any, 0, len(stream.Entries))
+	for _, entry := range stream.Entries {
+		entries = append(entries, newLokiWireEntry(entry))
+	}
+
+	return lokiWireStream{Stream: labelSet, Values: entries}
+}
+
+// newLokiWireEntry renders one entry as ["<unix-nanos>", "<line>"], with Loki's
+// optional third "categorized labels" element appended when the entry carries
+// structured metadata or parsed labels.
+func newLokiWireEntry(entry loghttp.Entry) []any {
+	value := []any{strconv.FormatInt(entry.Timestamp.UnixNano(), 10), entry.Line}
+
+	categorized := make(map[string]map[string]string, 2)
+	if entry.StructuredMetadata.Len() > 0 {
+		categorized["structuredMetadata"] = entry.StructuredMetadata.Map()
+	}
+	if entry.Parsed.Len() > 0 {
+		categorized["parsed"] = entry.Parsed.Map()
+	}
+	if len(categorized) > 0 {
+		value = append(value, categorized)
+	}
+	return value
+}
+
 // formatLokiResults formats the Loki query results into a readable string
 func formatLokiResults(result *loghttp.QueryResponse, format string) (string, error) {
 	f := Format(format)
@@ -83,7 +176,7 @@ func formatLokiResults(result *loghttp.QueryResponse, format string) (string, er
 
 	switch f {
 	case FormatJSON:
-		return marshalIndentJSON(result)
+		return marshalIndentJSON(newLokiStreamsResponse(result, streams))
 	case FormatText:
 		return renderText(streams), nil
 	default: // FormatRaw
@@ -98,7 +191,7 @@ func renderEmptyStreams(result *loghttp.QueryResponse, f Format) (string, error)
 		return "No logs found matching the query", nil
 	}
 	if len(result.Warnings) > 0 {
-		return marshalIndentJSON(result)
+		return marshalIndentJSON(newLokiStreamsResponse(result, nil))
 	}
 	return "{\"message\": \"No logs found matching the query\"}", nil
 }
