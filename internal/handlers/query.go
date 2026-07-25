@@ -34,11 +34,10 @@ import (
 //     also passes no filter, head or tail, post-processing is skipped
 //     entirely and the response keeps Loki's own newest-first ordering and
 //     stream grouping. Otherwise — with a detector, or with any of filter,
-//     head or tail — entries are flattened, re-sorted *oldest first* and
-//     regrouped, so enabling secret filtering alone reverses the order of the
-//     lines and makes the order of the streams nondeterministic. That is
-//     pre-existing behaviour, reported in FINDINGS.md §4 and §5, not a
-//     property to rely on.
+//     head or tail — entries are flattened, re-sorted and regrouped, but the
+//     sort is newest-first too and the regrouped streams are ordered by their
+//     label-set string, so post-processing does not change the ordering a
+//     client sees.
 //
 // When lines are withheld the count is reported twice over, by two channels
 // that do not overlap: appended to the rendered text for raw and text, and

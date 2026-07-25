@@ -64,7 +64,15 @@ type logEntry struct {
 	Labels    loghttp.LabelSet
 }
 
-// collectAndSortEntries merges entries from all streams and sorts them by timestamp (oldest first)
+// collectAndSortEntries merges entries from all streams and sorts them newest
+// first, matching the logproto.BACKWARD direction the range query asks Loki
+// for. Post-processing therefore preserves the ordering a client would see if
+// it were skipped entirely.
+//
+// sort.Slice is not stable, so entries sharing a timestamp are broken apart by
+// line and then by label-set string. That makes the result a function of the
+// input alone: equal-timestamp entries cannot reorder between two runs on the
+// same data.
 func collectAndSortEntries(streams loghttp.Streams) []logEntry {
 	var entries []logEntry
 	for _, stream := range streams {
@@ -77,9 +85,15 @@ func collectAndSortEntries(streams loghttp.Streams) []logEntry {
 		}
 	}
 
-	// Sort by timestamp ascending (oldest first)
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Timestamp.Before(entries[j].Timestamp)
+		a, b := entries[i], entries[j]
+		if !a.Timestamp.Equal(b.Timestamp) {
+			return a.Timestamp.After(b.Timestamp)
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		return a.Labels.String() < b.Labels.String()
 	})
 
 	return entries
@@ -106,11 +120,12 @@ func filterEntries(entries []logEntry, filter string, caseSensitive bool) []logE
 	return filtered
 }
 
-// applyHeadTail returns the first head entries or the last tail entries,
-// against the ascending order collectAndSortEntries produced — so head is the
-// oldest and tail the newest. A count at or above len(entries), or a
-// non-positive one, returns entries unchanged, and the result always aliases
-// the input slice rather than copying.
+// applyHeadTail returns the head oldest or the tail newest entries, keeping
+// the newest-first order collectAndSortEntries produced. Because that order is
+// descending, head slices off the end and tail off the front — the mirror of
+// what the names suggest. A count at or above len(entries), or a non-positive
+// one, returns entries unchanged, and the result always aliases the input
+// slice rather than copying.
 //
 // head wins if both are positive. The query handler rejects that combination
 // before it gets here, so the precedence is a fallback, not a contract.
@@ -123,14 +138,14 @@ func applyHeadTail(entries []logEntry, head, tail int) []logEntry {
 		if head >= len(entries) {
 			return entries
 		}
-		return entries[:head]
+		return entries[len(entries)-head:]
 	}
 
 	if tail > 0 {
 		if tail >= len(entries) {
 			return entries
 		}
-		return entries[len(entries)-tail:]
+		return entries[:tail]
 	}
 
 	return entries
@@ -140,9 +155,9 @@ func applyHeadTail(entries []logEntry, head, tail int) []logEntry {
 // format, grouping entries by their label set and preserving the entry order
 // within each stream.
 //
-// The order of the streams themselves is nondeterministic: they are emitted by
-// ranging a map, and Go randomises map iteration. Two identical queries can
-// return the same streams in different orders (FINDINGS.md §5).
+// The grouping runs through a map, whose iteration order Go randomises, so the
+// streams are sorted by label-set string before they are returned. Without
+// that, two identical queries could emit the same streams in different orders.
 func entriesToStreams(entries []logEntry) loghttp.Streams {
 	if len(entries) == 0 {
 		return loghttp.Streams{}
@@ -170,9 +185,15 @@ func entriesToStreams(entries []logEntry) loghttp.Streams {
 		}
 	}
 
-	var streams loghttp.Streams
-	for _, stream := range streamMap {
-		streams = append(streams, *stream)
+	keys := make([]string, 0, len(streamMap))
+	for key := range streamMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	streams := make(loghttp.Streams, 0, len(keys))
+	for _, key := range keys {
+		streams = append(streams, *streamMap[key])
 	}
 
 	return streams

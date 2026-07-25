@@ -164,15 +164,21 @@ func TestFilterEntries(t *testing.T) {
 }
 
 // TestApplyHeadTail covers head, tail, and the out-of-range cases in one table.
+//
+// The input is in the newest-first order collectAndSortEntries produces, and
+// every expectation names log lines rather than slice positions: head must
+// still mean "the oldest N" and tail "the newest N", whichever end of the
+// slice those now live at.
 func TestApplyHeadTail(t *testing.T) {
 	t.Parallel()
 
+	// Newest first: "fifth" is the most recent line, "first" the oldest.
 	five := []logEntry{
-		{Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Line: "first"},
-		{Timestamp: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Line: "second"},
-		{Timestamp: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Line: "third"},
-		{Timestamp: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), Line: "fourth"},
 		{Timestamp: time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC), Line: "fifth"},
+		{Timestamp: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), Line: "fourth"},
+		{Timestamp: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Line: "third"},
+		{Timestamp: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Line: "second"},
+		{Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Line: "first"},
 	}
 
 	tests := []struct {
@@ -182,19 +188,19 @@ func TestApplyHeadTail(t *testing.T) {
 		tail    int
 		want    []string
 	}{
-		{name: "head takes the oldest", entries: five, head: 3, want: []string{"first", "second", "third"}},
-		{name: "tail takes the newest", entries: five, tail: 2, want: []string{"fourth", "fifth"}},
+		{name: "head takes the oldest", entries: five, head: 3, want: []string{"third", "second", "first"}},
+		{name: "tail takes the newest", entries: five, tail: 2, want: []string{"fifth", "fourth"}},
 		{
 			name: "head larger than count returns everything", entries: five, head: 10,
-			want: []string{"first", "second", "third", "fourth", "fifth"},
+			want: []string{"fifth", "fourth", "third", "second", "first"},
 		},
 		{
 			name: "tail larger than count returns everything", entries: five, tail: 10,
-			want: []string{"first", "second", "third", "fourth", "fifth"},
+			want: []string{"fifth", "fourth", "third", "second", "first"},
 		},
 		{
 			name: "neither head nor tail returns everything", entries: five,
-			want: []string{"first", "second", "third", "fourth", "fifth"},
+			want: []string{"fifth", "fourth", "third", "second", "first"},
 		},
 		{name: "empty input", entries: nil, head: 3},
 		{name: "head wins when both are set", entries: five, head: 1, tail: 1, want: []string{"first"}},
@@ -243,11 +249,60 @@ func TestCollectAndSortEntries_MultipleStreams(t *testing.T) {
 		t.Fatalf("Expected 4 entries, got %d", len(entries))
 	}
 
-	// Verify entries are sorted by timestamp (oldest first)
-	expected := []string{"job1-first", "job2-second", "job1-third", "job2-fourth"}
+	// Verify entries are sorted by timestamp (newest first), matching the
+	// logproto.BACKWARD direction the range query asks Loki for.
+	expected := []string{"job2-fourth", "job1-third", "job2-second", "job1-first"}
 	for i, entry := range entries {
 		if entry.Line != expected[i] {
 			t.Errorf("Entry %d: expected '%s', got '%s'", i, expected[i], entry.Line)
+		}
+	}
+}
+
+// TestCollectAndSortEntries_EqualTimestamps pins the tie-break that makes the
+// sort a function of the input alone. sort.Slice is not stable, so without it
+// entries sharing a timestamp could come back in a different order run to run.
+func TestCollectAndSortEntries_EqualTimestamps(t *testing.T) {
+	sameTS := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	streams := loghttp.Streams{
+		{
+			Labels: loghttp.LabelSet{"job": "zeta"},
+			Entries: []loghttp.Entry{
+				{Timestamp: sameTS, Line: "shared line"},
+				{Timestamp: sameTS, Line: "b line"},
+			},
+		},
+		{
+			Labels: loghttp.LabelSet{"job": "alpha"},
+			Entries: []loghttp.Entry{
+				{Timestamp: newer, Line: "newest"},
+				{Timestamp: sameTS, Line: "shared line"},
+				{Timestamp: sameTS, Line: "a line"},
+			},
+		},
+	}
+
+	// Newest first; then equal timestamps by line; then by label set.
+	want := []struct{ line, job string }{
+		{"newest", "alpha"},
+		{"a line", "alpha"},
+		{"b line", "zeta"},
+		{"shared line", "alpha"},
+		{"shared line", "zeta"},
+	}
+
+	for i := 0; i < 50; i++ {
+		entries := collectAndSortEntries(streams)
+		if len(entries) != len(want) {
+			t.Fatalf("got %d entries, want %d", len(entries), len(want))
+		}
+		for j, w := range want {
+			if entries[j].Line != w.line || entries[j].Labels["job"] != w.job {
+				t.Fatalf("iteration %d entry %d = (%q, job=%q), want (%q, job=%q)",
+					i, j, entries[j].Line, entries[j].Labels["job"], w.line, w.job)
+			}
 		}
 	}
 }
@@ -262,9 +317,15 @@ func TestEntriesToStreams(t *testing.T) {
 
 	streams := entriesToStreams(entries)
 
-	// Should have 2 streams (grouped by labels)
+	// Should have 2 streams (grouped by labels), ordered by label-set string.
 	if len(streams) != 2 {
-		t.Errorf("Expected 2 streams, got %d", len(streams))
+		t.Fatalf("Expected 2 streams, got %d", len(streams))
+	}
+	wantLabels := []string{`{job="other"}`, `{job="test"}`}
+	for i, want := range wantLabels {
+		if got := streams[i].Labels.String(); got != want {
+			t.Errorf("stream %d labels = %s, want %s", i, got, want)
+		}
 	}
 
 	// Count total entries across streams
@@ -274,6 +335,36 @@ func TestEntriesToStreams(t *testing.T) {
 	}
 	if totalEntries != 3 {
 		t.Errorf("Expected 3 total entries across streams, got %d", totalEntries)
+	}
+}
+
+// TestEntriesToStreams_StableOrder pins that the stream order does not depend
+// on Go's randomised map iteration. The grouping runs through a map, so a
+// single pass would agree with an unsorted implementation by chance; only
+// repetition catches it.
+func TestEntriesToStreams_StableOrder(t *testing.T) {
+	jobs := []string{"eee", "aaa", "ccc", "bbb", "ddd"}
+	entries := make([]logEntry, 0, len(jobs))
+	for i, job := range jobs {
+		entries = append(entries, logEntry{
+			Timestamp: time.Date(2024, 1, 1, 0, 0, i, 0, time.UTC),
+			Line:      "line from " + job,
+			Labels:    loghttp.LabelSet{"job": job},
+		})
+	}
+
+	want := []string{`{job="aaa"}`, `{job="bbb"}`, `{job="ccc"}`, `{job="ddd"}`, `{job="eee"}`}
+
+	for i := 0; i < 50; i++ {
+		streams := entriesToStreams(entries)
+		if len(streams) != len(want) {
+			t.Fatalf("iteration %d: got %d streams, want %d", i, len(streams), len(want))
+		}
+		for j, w := range want {
+			if got := streams[j].Labels.String(); got != w {
+				t.Fatalf("iteration %d: stream %d labels = %s, want %s", i, j, got, w)
+			}
+		}
 	}
 }
 
