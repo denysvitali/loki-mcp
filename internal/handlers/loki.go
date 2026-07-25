@@ -29,14 +29,6 @@ func PingLoki(params *LokiParams) error {
 	return nil
 }
 
-// SSEEvent represents an event to be sent via SSE
-type SSEEvent struct {
-	Type      string `json:"type"`
-	Query     string `json:"query"`
-	Timestamp string `json:"timestamp"`
-	Results   any    `json:"results"`
-}
-
 // Default values
 const (
 	DefaultHTTPTimeout = 30 * time.Second
