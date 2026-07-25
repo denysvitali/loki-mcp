@@ -2,243 +2,222 @@
 
 [![CI](https://github.com/kaiko-ai/loki-mcp/workflows/CI/badge.svg)](https://github.com/kaiko-ai/loki-mcp/actions/workflows/ci.yml)
 
-A Go-based server implementation for the Model Context Protocol (MCP) with Grafana Loki integration.
+An MCP (Model Context Protocol) server that exposes Grafana Loki as three tools —
+`loki_query`, `loki_label_names`, `loki_label_values` — to MCP clients such as
+Claude Code, Claude Desktop, Cursor and n8n.
 
-## Installation
+## Install
 
-### Option 1: Go Install
-
-```bash
-go install github.com/kaiko-ai/loki-mcp@latest
-```
-
-### Option 2: Download Release Binary
-
-Download the pre-built binary for your platform from the [Releases page](https://github.com/kaiko-ai/loki-mcp/releases).
-
-### Option 3: Build from Source
+### Build from source
 
 ```bash
 git clone https://github.com/kaiko-ai/loki-mcp.git
 cd loki-mcp
-go build -o loki-mcp .
+go build -o loki-mcp .        # or: make build
 ```
 
-The server communicates using stdin/stdout and SSE following the Model Context Protocol (MCP). This makes it suitable for use with Claude Code, Claude Desktop, and other MCP-compatible clients.
+Requires Go 1.26.4 or newer (see `go.mod`).
 
-## Project Structure
+`go install github.com/kaiko-ai/loki-mcp@latest` does **not** work: `go.mod`
+carries a `replace` directive (`github.com/hashicorp/memberlist` →
+`github.com/grafana/memberlist`), which `go install` refuses. Build from source
+or use a release binary instead.
 
-```
-.
-├── cmd/
-│   └── loki-mcp/         # MCP server implementation
-├── internal/
-│   └── handlers/         # Tool handlers
-├── docker/               # Docker-related files (promtail, grafana, scripts)
-└── go.mod                # Go module definition
-```
+### Release binary
 
-## MCP Server
+Pre-built binaries for linux/darwin/windows on amd64/arm64 are published by
+goreleaser on the [Releases page](https://github.com/kaiko-ai/loki-mcp/releases).
 
-The Loki MCP Server implements the Model Context Protocol (MCP) and provides the following tools:
+## Running the server
 
-### Loki Query Tool
+The binary does nothing useful without a subcommand — bare `loki-mcp` prints
+help and exits 0.
 
-The `loki_query` tool allows you to query Grafana Loki log data:
+| Command | What it does |
+|---|---|
+| `loki-mcp stdio` | Serves MCP over stdin/stdout. All logs go to stderr. Use this for Claude Desktop, Claude Code and Cursor. |
+| `loki-mcp http` | Serves MCP over HTTP on `0.0.0.0:8080` by default. |
+| `loki-mcp version` | Prints `loki-mcp <version>`. |
 
-- Required parameters:
-  - `query`: LogQL query string
+`stdio`, `http` and `version` all ping Loki (`GET /loki/api/v1/labels`) before
+doing anything and exit 1 if it is unreachable — `version` included, which is a
+known wart.
 
-- Optional parameters:
-  - `url`: The Loki server URL (default: from LOKI_URL environment variable or http://localhost:3100)
-  - `start`: Start time for the query (default: 1h ago)
-  - `end`: End time for the query (default: now)
-  - `limit`: Maximum number of entries to return (default: 100)
-  - `org`: Organization ID for the query (sent as X-Scope-OrgID header)
+### HTTP endpoints
 
-### Loki Label Names Tool
+| Path | Purpose |
+|---|---|
+| `/stream` | Streamable HTTP — modern MCP clients |
+| `/sse` | SSE event stream — legacy |
+| `/mcp` | SSE message endpoint — legacy |
 
-The `loki_label_names` tool returns all available label names from Loki.
+`--disable-sse` removes `/sse` and `/mcp`; they then return 404.
 
-### Loki Label Values Tool
+## Tools
 
-The `loki_label_values` tool returns all values for a specific label.
+### `loki_query`
 
-#### Environment Variables
+Runs a LogQL query.
 
-The Loki tools support the following environment variables:
+| Parameter | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `query` | string | yes | — | LogQL query string |
+| `url` | string | no | `LOKI_URL` / `--url` | Loki server URL |
+| `username` | string | no | `LOKI_USERNAME` | Basic auth username |
+| `password` | string | no | `LOKI_PASSWORD` | Basic auth password |
+| `token` | string | no | `LOKI_TOKEN` | Bearer token |
+| `org` | string | no | `LOKI_ORG_ID` | Sent as `X-Scope-OrgID` |
+| `start` | string | no | 1h ago | See time formats below |
+| `end` | string | no | now | See time formats below |
+| `limit` | number | no | 100 | Max entries returned by Loki |
+| `head` | number | no | — | Keep only the first N (oldest) entries. Mutually exclusive with `tail`. |
+| `tail` | number | no | — | Keep only the last N (newest) entries. Mutually exclusive with `head`. |
+| `filter` | string | no | — | Keep only lines containing this substring |
+| `filter_case_sensitive` | boolean | no | `false` | Make `filter` case-sensitive |
+| `format` | string | no | `raw` | `raw`, `json` or `text` |
 
-- `LOKI_URL`: Default Loki server URL to use if not specified in the request
-- `LOKI_ORG_ID`: Default organization ID to use if not specified in the request
-- `LOKI_USERNAME`: Default username for basic authentication if not specified in the request
-- `LOKI_PASSWORD`: Default password for basic authentication if not specified in the request
-- `LOKI_TOKEN`: Default bearer token for authentication if not specified in the request
-- `LOKI_QUERY_FILTER`: LogQL stream selector to restrict all queries, for example `{namespace="prod"}`
-- `LOKI_SECRET_FILTER`: Enables returned log secret filtering. Defaults to `true`; set to `false` to opt out.
-- `LOKI_OTEL_STDERR`: Enables OpenTelemetry console exporters on stderr when set to `true`.
-- Standard `OTEL_*` variables: Configure OTLP traces, metrics, and logs export. Console output from this server is only enabled through `LOKI_OTEL_STDERR` so stdout stays reserved for stdio MCP traffic.
+### `loki_label_names`
 
-**Security Note**: When using authentication environment variables, be careful not to expose sensitive credentials in logs or configuration files. Consider using token-based authentication over username/password when possible.
+Returns all label names. Parameters: `url`, `username`, `password`, `token`,
+`org`, `start`, `end`, `format` — same meaning and defaults as above.
 
-### Safety Controls
+### `loki_label_values`
 
-Returned log lines are scanned for secrets by default. If a line matches the default betterleaks ruleset, the entire line is omitted and the tool output includes a note such as `1 line omitted due to detected secrets`. Disable this only for trusted local debugging:
+Returns all values of one label. Requires `label`. Otherwise the same
+parameters as `loki_label_names`.
+
+### Time formats
+
+`start` and `end` accept `now`, a negative Go duration (`-1h`, `-30m`),
+RFC3339, `2006-01-02T15:04:05`, `2006-01-02 15:04:05`, or `2006-01-02`.
+
+## Flags and environment variables
+
+Global flags, available on every subcommand. The flag wins over the env var.
+
+| Flag | Env | Default |
+|---|---|---|
+| `-u`, `--url` | `LOKI_URL` | `http://localhost:3100` |
+| `--org-id` | `LOKI_ORG_ID` | — |
+| `--username` | `LOKI_USERNAME` | — |
+| `--password` | `LOKI_PASSWORD` | — |
+| `--token` | `LOKI_TOKEN` | — |
+| `-f`, `--query-filter` | `LOKI_QUERY_FILTER` | — |
+| `--secret-filter` | `LOKI_SECRET_FILTER` | `true` |
+| `--otel-stderr` | `LOKI_OTEL_STDERR` | `false` |
+| `-l`, `--log-level` | `LOKI_LOG_LEVEL` | `info` (`debug`, `info`, `warn`, `error`) |
+| `--log-format` | `LOKI_LOG_FORMAT` | `text` (`text`, `json`) |
+
+`http`-only flags:
+
+| Flag | Env | Default |
+|---|---|---|
+| `--host` | `LOKI_HOST` | `0.0.0.0` |
+| `-p`, `--port` | `PORT` | `8080` |
+| `--disable-sse` | `LOKI_DISABLE_SSE` | `false` |
+
+Credentials passed as flags are visible in the process list; prefer the
+environment variables, and prefer `LOKI_TOKEN` over username/password.
+
+## Safety controls
+
+### Secret filter (on by default)
+
+Every returned log line is scanned with the default betterleaks ruleset. A
+matching line is dropped whole and the output gains a note such as
+`1 line omitted due to detected secrets`. Turn it off only for trusted local
+debugging:
 
 ```bash
-loki-mcp --secret-filter=false
-LOKI_SECRET_FILTER=false loki-mcp
+loki-mcp stdio --secret-filter=false
+LOKI_SECRET_FILTER=false loki-mcp stdio
 ```
 
-Use `--query-filter` or `LOKI_QUERY_FILTER` to force every client query through a LogQL stream selector:
+### Query filter
+
+A LogQL stream selector that is ANDed into every client query, so clients
+cannot read outside it. With the filter `{namespace="prod"}`, a client query of
+`{job="api"}` is executed as `{namespace="prod", job="api"}`.
 
 ```bash
-loki-mcp --query-filter='{namespace="prod"}'
+loki-mcp stdio --query-filter='{namespace="prod"}'
+LOKI_QUERY_FILTER='{namespace="prod"}' loki-mcp http
 ```
 
-OpenTelemetry OTLP export is controlled by standard environment variables such as `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, and `OTEL_LOGS_EXPORTER`. For local debugging, use stderr console exporters:
+An unparseable selector is a startup error.
+
+## OpenTelemetry
+
+Traces, metrics and logs are exported via the standard `OTEL_*` environment
+variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_EXPORTER`,
+`OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`, …). For local debugging,
+`--otel-stderr` adds console exporters. They write to **stderr** only, so stdio
+transport stays protocol-safe.
 
 ```bash
-loki-mcp --otel-stderr
+loki-mcp stdio --otel-stderr
 ```
 
-## Docker Support
+## Docker
 
-You can build and run the MCP server using Docker:
+The image's entrypoint is the bare binary, so the subcommand is the container
+argument:
 
 ```bash
-# Build the Docker image
 docker build -t loki-mcp .
 
-# Run the server
-docker run --rm -i loki-mcp
+# stdio mode (needs -i so the client can write to stdin)
+docker run --rm -i loki-mcp stdio
+
+# HTTP mode
+docker run --rm -p 8080:8080 loki-mcp http
 ```
 
-Alternatively, you can use Docker Compose:
+## Local development stack
+
+`docker-compose.yml` brings up Loki (`:3100`), Grafana (`:3000`, anonymous
+admin, Loki pre-provisioned as the default datasource), promtail, a
+log-generator container, and a `loki-mcp-server` service publishing `:8080`.
 
 ```bash
-# Build and run with Docker Compose
-docker-compose up --build
+docker compose up -d
 ```
 
-### Local Testing with Loki
+Caveats, both visible in the compose file:
 
-The project includes a complete Docker Compose setup to test Loki queries locally:
+- The `loki-mcp-server` service inherits the bare-binary entrypoint with no
+  subcommand, so the container prints help and exits. Add `command: ["http"]`
+  to the service to make it serve.
+- Promtail scrapes `/var/log/*log` from the host under `job=varlogs`. It does
+  not collect the `log-generator` container's output.
 
-1. Start the Docker Compose environment:
-   ```bash
-   docker-compose up -d
-   ```
-
-   This will start:
-   - A Loki server on port 3100
-   - A Grafana instance on port 3000 (pre-configured with Loki as a data source)
-   - A log generator container that sends sample logs to Loki
-   - The Loki MCP server
-
-2. Insert dummy logs for testing:
-   ```bash
-   # Insert 10 dummy logs with default settings
-   ./docker/insert-loki-logs.sh
-
-   # Insert 20 logs with custom job and app name
-   ./docker/insert-loki-logs.sh --num 20 --job "custom-job" --app "my-app"
-
-   # Insert logs with custom environment and interval
-   ./docker/insert-loki-logs.sh --env "production" --interval 0.5
-
-   # Show help message
-   ./docker/insert-loki-logs.sh --help
-   ```
-
-3. Access the Grafana UI at http://localhost:3000 to explore logs visually.
-
-## Server-Sent Events (SSE) Support
-
-The server now supports multiple modes of communication:
-1. Standard input/output (stdin/stdout) following the Model Context Protocol (MCP)
-2. HTTP Server with Server-Sent Events (SSE) endpoint for integration with tools like n8n
-3. Streamable HTTP endpoint for modern MCP clients
-
-The default port for the HTTP server is 8080, but can be configured using the `PORT` environment variable.
-
-### Server Endpoints
-
-When running in HTTP mode, the server exposes the following endpoints:
-
-- SSE Endpoint: `http://localhost:8080/sse` - For real-time event streaming (legacy)
-- MCP Endpoint: `http://localhost:8080/mcp` - For MCP protocol messaging (legacy)
-- Streamable HTTP: `http://localhost:8080/stream` - For modern MCP clients
-
-### Using Docker with SSE
-
-When running the server with Docker, make sure to expose port 8080:
+Push test logs into Loki yourself:
 
 ```bash
-# Build the Docker image
-docker build -t loki-mcp .
-
-# Run the server with port mapping
-docker run -p 8080:8080 --rm -i loki-mcp
+./docker/insert-loki-logs.sh                                   # 10 logs, job=dummy-logs
+./docker/insert-loki-logs.sh --num 20 --job my-job --app my-app
+./docker/insert-loki-logs.sh --help
 ```
 
-### n8n Integration
+Then explore them in Grafana at http://localhost:3000.
 
-You can integrate the Loki MCP Server with n8n workflows:
+## Client configuration
 
-1. Install the MCP Client Tools node in n8n
-
-2. Configure the node with these parameters:
-   - **SSE Endpoint**: `http://your-server-address:8080/sse` (replace with your actual server address)
-   - **Authentication**: Choose appropriate authentication if needed
-   - **Tools to Include**: Choose which Loki tools to expose to the AI Agent
-
-3. Connect the MCP Client Tool node to an AI Agent node that will use the Loki querying capabilities
-
-Example workflow:
-Trigger → MCP Client Tool (Loki server) → AI Agent (Claude)
-
-## Architecture
-
-The Loki MCP Server uses a modular architecture:
-
-- **Server**: The main MCP server implementation in `main.go`
-- **Handlers**: Individual tool handlers in `internal/handlers/`
-  - `loki.go`: Grafana Loki query functionality
-
-## Using with Claude Code
-
-Add the MCP server to your Claude Code configuration using the CLI:
+### Claude Code
 
 ```bash
-claude mcp add loki-mcp -- loki-mcp
+claude mcp add loki-mcp -- loki-mcp stdio
 ```
 
-Or with environment variables:
+With environment variables:
 
 ```bash
-claude mcp add loki-mcp -e LOKI_URL=http://localhost:3100 -e LOKI_ORG_ID=your-org-id -- loki-mcp
+claude mcp add loki-mcp -e LOKI_URL=http://localhost:3100 -e LOKI_ORG_ID=your-org-id -- loki-mcp stdio
 ```
 
-This adds the configuration to your `~/.claude/settings.json`. You can also manually edit the file:
+### Claude Desktop
 
-```json
-{
-  "mcpServers": {
-    "loki-mcp": {
-      "command": "loki-mcp",
-      "args": [],
-      "env": {
-        "LOKI_URL": "http://localhost:3100",
-        "LOKI_ORG_ID": "your-org-id"
-      }
-    }
-  }
-}
-```
-
-## Using with Claude Desktop
-
-Add the following to your Claude Desktop configuration file:
+Config file location:
 
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
@@ -249,7 +228,7 @@ Add the following to your Claude Desktop configuration file:
   "mcpServers": {
     "loki-mcp": {
       "command": "loki-mcp",
-      "args": [],
+      "args": ["stdio"],
       "env": {
         "LOKI_URL": "http://localhost:3100",
         "LOKI_ORG_ID": "your-org-id"
@@ -259,27 +238,18 @@ Add the following to your Claude Desktop configuration file:
 }
 ```
 
-Restart Claude Desktop after updating the configuration.
+Restart Claude Desktop afterwards.
 
-## Example Queries
+### Cursor
 
-Once configured, you can use natural language to query Loki:
-
-- "Query Loki for logs with the query {job=\"varlogs\"}"
-- "Find error logs from the last hour using {job=\"varlogs\"} |= \"ERROR\""
-- "Show me the most recent 50 logs from job=varlogs"
-- "Query Loki for logs with org 'tenant-123' using {job=\"varlogs\"}"
-
-## Using with Cursor
-
-Add the following to your Cursor MCP settings (`.cursor/mcp.json`):
+Same JSON in `.cursor/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "loki-mcp": {
       "command": "loki-mcp",
-      "args": [],
+      "args": ["stdio"],
       "env": {
         "LOKI_URL": "http://localhost:3100",
         "LOKI_ORG_ID": "your-org-id"
@@ -289,24 +259,68 @@ Add the following to your Cursor MCP settings (`.cursor/mcp.json`):
 }
 ```
 
-Restart Cursor after adding the configuration.
+Restart Cursor afterwards.
+
+`args` must contain `stdio`. With `"args": []` the binary prints help and exits,
+and the client sees a server that never speaks MCP.
+
+### n8n
+
+Run the server with `loki-mcp http`, then point the n8n MCP Client Tools node at
+the SSE endpoint `http://your-server:8080/sse` and connect it to an AI Agent node.
+
+## Example prompts
+
+- "Query Loki for logs with the query {job=\"varlogs\"}"
+- "Find error logs from the last hour using {job=\"varlogs\"} |= \"ERROR\""
+- "Show me the 50 most recent logs from job=varlogs"
+
+## Project structure
+
+```
+.
+├── main.go              # 13 lines: sets the version string, calls cmd.Execute()
+├── cmd/                 # cobra commands: root.go, stdio.go, http.go, version.go
+├── internal/
+│   ├── handlers/        # MCP tool definitions and all Loki access
+│   │   ├── tools.go         # the three mcp.Tool schemas
+│   │   ├── query.go         # loki_query handler
+│   │   ├── labels.go        # loki_label_names / loki_label_values handlers
+│   │   ├── params.go        # shared params, defaults, time-range resolution
+│   │   ├── entries.go       # time parsing, sorting, keyword filter, head/tail
+│   │   ├── format.go        # raw / json / text renderers
+│   │   ├── filter.go        # LogQL stream-selector injection
+│   │   ├── loki_http.go     # direct Loki HTTP calls
+│   │   ├── secret_filter.go # betterleaks scan of returned lines
+│   │   └── config.go        # immutable handler config, built once at startup
+│   ├── server/          # MCP server construction, stdio and HTTP transports
+│   ├── logging/         # logrus setup (stderr)
+│   └── telemetry/       # OpenTelemetry providers and tool instrumentation
+├── docker/              # grafana/ and promtail/ configs, insert-loki-logs.sh
+└── docs/
+```
+
+## Development
+
+```bash
+go build -o loki-mcp .                    # make build
+gofmt -w .                                # make fmt
+golangci-lint run ./...                   # make lint
+go mod tidy                               # make tidy
+
+go test ./...                             # make test
+go test -race ./...
+go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
+```
+
+Integration tests live behind the `integration` build tag and need Docker:
+
+```bash
+go test -tags=integration ./internal/handlers -timeout 5m   # make test-integration
+```
+
+`make help` lists every target.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Running Tests
-
-The project includes comprehensive unit tests and CI/CD workflows to ensure reliability:
-
-```bash
-# Run all tests
-go test ./...
-
-# Run tests with coverage
-go test -coverprofile=coverage.out ./...
-go tool cover -func=coverage.out
-
-# Run tests with race detection
-go test -race ./...
-```
+This repository contains no `LICENSE` file.
