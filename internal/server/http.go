@@ -16,17 +16,42 @@ import (
 	"github.com/kaiko-ai/loki-mcp/internal/logging"
 )
 
-// HTTPConfig holds configuration for the HTTP server
+// HTTPConfig is the listening configuration for RunHTTP. The zero value is
+// accepted but binds ":" — every interface on a kernel-chosen port — so cmd
+// always supplies both fields.
 type HTTPConfig struct {
-	Host       string
-	Port       string
+	// Host is the bind address, joined to Port as "Host:Port" with no
+	// validation. "" binds all interfaces; cmd defaults it to "0.0.0.0".
+	Host string
+	// Port is the port as a string, because it arrives from a flag and is
+	// never arithmetic. "" or "0" binds a kernel-chosen ephemeral port, but
+	// nothing reports which one back, so it is only useful when the caller
+	// does not need to connect.
+	Port string
+	// DisableSSE drops the legacy /sse and /mcp routes, leaving only /stream.
+	// Requests to the dropped paths then 404. It does not affect /stream.
 	DisableSSE bool
 }
 
 const defaultShutdownTimeout = 5 * time.Second
 
-// RunHTTP starts the MCP server in HTTP mode. It returns once the server has
-// stopped, either because SIGINT/SIGTERM arrived or because it failed.
+// RunHTTP serves the MCP tools over HTTP and blocks until SIGINT or SIGTERM
+// arrives, or until the listener fails. There is no other way to stop it: it
+// takes no context and exposes no handle, so a caller that needs to stop it
+// must signal the process.
+//
+// It returns nil on a clean signalled shutdown and an error otherwise: the
+// wrapped listen failure if the server could not start or died, or whatever
+// http.Server.Shutdown reported. RunHTTP always flushes telemetry before
+// returning, on every path including the error ones.
+//
+// Shutdown is not a full graceful drain. The 5s defaultShutdownTimeout is an
+// upper bound derived from an already-cancelled context, so in-flight requests
+// — an open /sse stream, a slow /stream call — are dropped immediately and
+// RunHTTP returns context.Canceled rather than nil. On an idle server the same
+// path returns nil, which is why the defect is easy to miss. FINDINGS.md §7
+// has the reproduction and the one-line fix, deliberately not applied here
+// because it changes the process exit status on an ordinary SIGTERM.
 //
 // The deferred calls run last-in-first-out: stop() detaches the signal
 // handler (and ends the goroutine signal.NotifyContext owns) before

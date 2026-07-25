@@ -7,7 +7,6 @@ import (
 	"github.com/kaiko-ai/loki-mcp/internal/server"
 )
 
-// stdioCmd represents the stdio command
 var stdioCmd = &cobra.Command{
 	Use:   "stdio",
 	Short: "Run the MCP server in stdio mode",
