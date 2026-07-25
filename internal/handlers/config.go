@@ -30,10 +30,12 @@ type Config struct {
 // control it. It returns the zero Config together with the error on any
 // failure, so a partially built configuration is never handed back.
 //
-// rawFilter is a LogQL stream selector such as `{namespace="prod"}`. Empty
-// leaves QueryFilter nil and queries unrestricted; anything else goes through
-// ParseFilter, and an unparseable selector is an error. A whitespace-only
-// rawFilter also yields a nil QueryFilter, because ParseFilter trims first.
+// rawFilter is a bare LogQL stream selector such as `{namespace="prod"}`.
+// Empty leaves QueryFilter nil and queries unrestricted; anything else goes
+// through ParseFilter, and an unparseable selector — or one carrying a
+// pipeline, which ParseFilter refuses rather than silently dropping — is an
+// error. A whitespace-only rawFilter also yields a nil QueryFilter, because
+// ParseFilter trims first.
 //
 // secretFilter=true builds a betterleaks detector with the default ruleset and
 // sets SkipFindingAppend, so concurrent scans accumulate nothing in the shared
