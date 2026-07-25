@@ -62,101 +62,29 @@ func injectMatchers(expr syntax.Expr, filterMatchers []*labels.Matcher) (syntax.
 
 	case *syntax.PipelineExpr:
 		// Log query with pipeline like {job="api"} |= "error" | json
-		// PipelineExpr.Left is *MatchersExpr
-		newLeft := mergeMatchersExpr(e.Left, filterMatchers)
-		return &syntax.PipelineExpr{
-			Left:        newLeft,
-			MultiStages: e.MultiStages,
-		}, nil
+		return injectPipeline(e, filterMatchers)
 
 	case *syntax.RangeAggregationExpr:
 		// Metric queries like rate({job="api"}[5m])
-		newLeft, err := injectMatchers(e.Left, filterMatchers)
-		if err != nil {
-			return nil, err
-		}
-		if logRange, ok := newLeft.(*syntax.LogRangeExpr); ok {
-			return &syntax.RangeAggregationExpr{
-				Left:      logRange,
-				Operation: e.Operation,
-				Params:    e.Params,
-				Grouping:  e.Grouping,
-			}, nil
-		}
-		return nil, fmt.Errorf("unexpected type for range aggregation: %T", newLeft)
+		return injectRangeAggregation(e, filterMatchers)
 
+	// The VectorAggregationExpr and LogRangeExpr cases below are only
+	// coincidentally similar: they wrap different AST node types with different
+	// fields and must stay independent.
 	case *syntax.VectorAggregationExpr:
 		// Aggregation like sum(rate({job="api"}[5m]))
-		newLeft, err := injectMatchers(e.Left, filterMatchers)
-		if err != nil {
-			return nil, err
-		}
-		if sampleExpr, ok := newLeft.(syntax.SampleExpr); ok {
-			return &syntax.VectorAggregationExpr{
-				Left:      sampleExpr,
-				Grouping:  e.Grouping,
-				Params:    e.Params,
-				Operation: e.Operation,
-			}, nil
-		}
-		return nil, fmt.Errorf("unexpected type for vector aggregation: %T", newLeft)
+		return injectVectorAggregation(e, filterMatchers)
 
 	case *syntax.LogRangeExpr:
 		// Log range like {job="api"}[5m]
-		newLeft, err := injectMatchers(e.Left, filterMatchers)
-		if err != nil {
-			return nil, err
-		}
-		if logSelector, ok := newLeft.(syntax.LogSelectorExpr); ok {
-			return &syntax.LogRangeExpr{
-				Left:     logSelector,
-				Interval: e.Interval,
-				Offset:   e.Offset,
-				Unwrap:   e.Unwrap,
-			}, nil
-		}
-		return nil, fmt.Errorf("unexpected type for log range: %T", newLeft)
+		return injectLogRange(e, filterMatchers)
 
 	case *syntax.BinOpExpr:
 		// Binary operation like sum(rate({job="api"}[5m])) / sum(rate({job="api"}[5m]))
-		newLeft, err := injectMatchers(e.SampleExpr, filterMatchers)
-		if err != nil {
-			return nil, err
-		}
-		newRight, err := injectMatchers(e.RHS, filterMatchers)
-		if err != nil {
-			return nil, err
-		}
-		leftSample, ok := newLeft.(syntax.SampleExpr)
-		if !ok {
-			return nil, fmt.Errorf("unexpected type for binop left: %T", newLeft)
-		}
-		rightSample, ok := newRight.(syntax.SampleExpr)
-		if !ok {
-			return nil, fmt.Errorf("unexpected type for binop right: %T", newRight)
-		}
-		return &syntax.BinOpExpr{
-			SampleExpr: leftSample,
-			RHS:        rightSample,
-			Op:         e.Op,
-			Opts:       e.Opts,
-		}, nil
+		return injectBinOp(e, filterMatchers)
 
 	case *syntax.LabelReplaceExpr:
-		newLeft, err := injectMatchers(e.Left, filterMatchers)
-		if err != nil {
-			return nil, err
-		}
-		if sampleExpr, ok := newLeft.(syntax.SampleExpr); ok {
-			return &syntax.LabelReplaceExpr{
-				Left:        sampleExpr,
-				Dst:         e.Dst,
-				Replacement: e.Replacement,
-				Src:         e.Src,
-				Regex:       e.Regex,
-			}, nil
-		}
-		return nil, fmt.Errorf("unexpected type for label_replace: %T", newLeft)
+		return injectLabelReplace(e, filterMatchers)
 
 	case *syntax.LiteralExpr:
 		// Literal values don't need modification
@@ -165,6 +93,109 @@ func injectMatchers(expr syntax.Expr, filterMatchers []*labels.Matcher) (syntax.
 	default:
 		return nil, fmt.Errorf("unsupported expression type: %T", expr)
 	}
+}
+
+// injectPipeline rebuilds a pipeline expression around a merged stream selector.
+// PipelineExpr.Left is always a *MatchersExpr, so no recursion is needed.
+func injectPipeline(e *syntax.PipelineExpr, filterMatchers []*labels.Matcher) (syntax.Expr, error) {
+	return &syntax.PipelineExpr{
+		Left:        mergeMatchersExpr(e.Left, filterMatchers),
+		MultiStages: e.MultiStages,
+	}, nil
+}
+
+func injectRangeAggregation(e *syntax.RangeAggregationExpr, filterMatchers []*labels.Matcher) (syntax.Expr, error) {
+	newLeft, err := injectMatchers(e.Left, filterMatchers)
+	if err != nil {
+		return nil, err
+	}
+	logRange, ok := newLeft.(*syntax.LogRangeExpr)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for range aggregation: %T", newLeft)
+	}
+	return &syntax.RangeAggregationExpr{
+		Left:      logRange,
+		Operation: e.Operation,
+		Params:    e.Params,
+		Grouping:  e.Grouping,
+	}, nil
+}
+
+func injectVectorAggregation(e *syntax.VectorAggregationExpr, filterMatchers []*labels.Matcher) (syntax.Expr, error) {
+	newLeft, err := injectMatchers(e.Left, filterMatchers)
+	if err != nil {
+		return nil, err
+	}
+	sampleExpr, ok := newLeft.(syntax.SampleExpr)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for vector aggregation: %T", newLeft)
+	}
+	return &syntax.VectorAggregationExpr{
+		Left:      sampleExpr,
+		Grouping:  e.Grouping,
+		Params:    e.Params,
+		Operation: e.Operation,
+	}, nil
+}
+
+func injectLogRange(e *syntax.LogRangeExpr, filterMatchers []*labels.Matcher) (syntax.Expr, error) {
+	newLeft, err := injectMatchers(e.Left, filterMatchers)
+	if err != nil {
+		return nil, err
+	}
+	logSelector, ok := newLeft.(syntax.LogSelectorExpr)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for log range: %T", newLeft)
+	}
+	return &syntax.LogRangeExpr{
+		Left:     logSelector,
+		Interval: e.Interval,
+		Offset:   e.Offset,
+		Unwrap:   e.Unwrap,
+	}, nil
+}
+
+func injectBinOp(e *syntax.BinOpExpr, filterMatchers []*labels.Matcher) (syntax.Expr, error) {
+	newLeft, err := injectMatchers(e.SampleExpr, filterMatchers)
+	if err != nil {
+		return nil, err
+	}
+	newRight, err := injectMatchers(e.RHS, filterMatchers)
+	if err != nil {
+		return nil, err
+	}
+	leftSample, ok := newLeft.(syntax.SampleExpr)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for binop left: %T", newLeft)
+	}
+	rightSample, ok := newRight.(syntax.SampleExpr)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for binop right: %T", newRight)
+	}
+	return &syntax.BinOpExpr{
+		SampleExpr: leftSample,
+		RHS:        rightSample,
+		Op:         e.Op,
+		Opts:       e.Opts,
+	}, nil
+}
+
+func injectLabelReplace(e *syntax.LabelReplaceExpr, filterMatchers []*labels.Matcher) (syntax.Expr, error) {
+	newLeft, err := injectMatchers(e.Left, filterMatchers)
+	if err != nil {
+		return nil, err
+	}
+	sampleExpr, ok := newLeft.(syntax.SampleExpr)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for label_replace: %T", newLeft)
+	}
+	return &syntax.LabelReplaceExpr{
+		Left:        sampleExpr,
+		Dst:         e.Dst,
+		Replacement: e.Replacement,
+		Src:         e.Src,
+		Regex:       e.Regex,
+	}, nil
 }
 
 // mergeMatchersExpr creates a new MatchersExpr with filter matchers prepended.

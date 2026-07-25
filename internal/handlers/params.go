@@ -68,6 +68,32 @@ func (p *LokiParams) applyDefaults() {
 	}
 }
 
+// resolveTimeRange resolves the start/end window of a tool call. Both default
+// to a DefaultLookback-wide window ending now; either can be overridden by the
+// client. Every tool shares this rule, so it must change in one place.
+func resolveTimeRange(params *LokiParams) (start, end time.Time, err error) {
+	start = time.Now().Add(-DefaultLookback)
+	end = time.Now()
+
+	if params.Start != "" {
+		startTime, err := parseTime(params.Start)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid start time: %w", err)
+		}
+		start = startTime
+	}
+
+	if params.End != "" {
+		endTime, err := parseTime(params.End)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid end time: %w", err)
+		}
+		end = endTime
+	}
+
+	return start, end, nil
+}
+
 // newLokiClient creates a Loki client from the given parameters
 func newLokiClient(params *LokiParams) *client.DefaultClient {
 	return &client.DefaultClient{

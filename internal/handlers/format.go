@@ -9,174 +9,187 @@ import (
 	"github.com/grafana/loki/v3/pkg/loghttp"
 )
 
+// Format is the output format requested by a tool call. It stays a plain string
+// on the wire; LokiParams.Format holds the raw client value.
+type Format string
+
+// Supported output formats.
+const (
+	FormatRaw  Format = "raw"
+	FormatJSON Format = "json"
+	FormatText Format = "text"
+)
+
+// validate reports whether f is one of the supported formats.
+func (f Format) validate() error {
+	switch f {
+	case FormatRaw, FormatJSON, FormatText:
+		return nil
+	default:
+		return fmt.Errorf("unsupported format: %s. Supported formats: raw, json, text", string(f))
+	}
+}
+
+// marshalIndentJSON renders v as the two-space indented JSON used by the json
+// output format.
+func marshalIndentJSON(v any) (string, error) {
+	jsonBytes, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+	return string(jsonBytes), nil
+}
+
 // formatLokiResults formats the Loki query results into a readable string
 func formatLokiResults(result *loghttp.QueryResponse, format string) (string, error) {
-	// Extract streams from the result
+	f := Format(format)
+
+	// Metric queries return a matrix or vector rather than streams. Note that
+	// this branch, like the empty-streams one below, runs before format
+	// validation, so an unsupported format still produces output here.
 	streams, ok := result.Data.Result.(loghttp.Streams)
 	if !ok {
-		// Handle case where result is not streams (could be matrix/vector for metric queries)
-		switch format {
-		case "json":
-			jsonBytes, err := json.MarshalIndent(result, "", "  ")
-			if err != nil {
-				return "", fmt.Errorf("failed to marshal JSON: %w", err)
-			}
-			return string(jsonBytes), nil
-		default:
-			return fmt.Sprintf("Query returned %s result type", result.Data.ResultType), nil
+		if f == FormatJSON {
+			return marshalIndentJSON(result)
 		}
+		return fmt.Sprintf("Query returned %s result type", result.Data.ResultType), nil
 	}
 
 	if len(streams) == 0 {
-		switch format {
-		case "json":
-			if len(result.Warnings) > 0 {
-				jsonBytes, err := json.MarshalIndent(result, "", "  ")
-				if err != nil {
-					return "", fmt.Errorf("failed to marshal JSON: %w", err)
-				}
-				return string(jsonBytes), nil
-			}
-			return "{\"message\": \"No logs found matching the query\"}", nil
-		default:
-			return "No logs found matching the query", nil
-		}
+		return renderEmptyStreams(result, f)
 	}
 
-	switch format {
-	case "json":
-		// Return raw JSON response
-		jsonBytes, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal JSON: %w", err)
-		}
-		return string(jsonBytes), nil
-
-	case "raw":
-		// Return raw log lines with timestamps and labels in simple format
-		var sb strings.Builder
-		for _, stream := range streams {
-			// Build labels string
-			labels := stream.Labels.String()
-			if labels != "{}" {
-				labels = labels + " "
-			} else {
-				labels = ""
-			}
-
-			for _, entry := range stream.Entries {
-				timestamp := entry.Timestamp.Format(time.RFC3339)
-				fmt.Fprintf(&sb, "%s %s%s\n", timestamp, labels, entry.Line)
-			}
-		}
-		return sb.String(), nil
-
-	case "text":
-		// Return formatted text with timestamps and stream info (original behavior)
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "Found %d streams:\n\n", len(streams))
-
-		for i, stream := range streams {
-			// Format stream labels
-			fmt.Fprintf(&sb, "Stream %s %d:\n", stream.Labels.String(), i+1)
-
-			// Format log entries
-			for _, entry := range stream.Entries {
-				fmt.Fprintf(&sb, "[%s] %s\n", entry.Timestamp.Format(time.RFC3339), entry.Line)
-			}
-			sb.WriteString("\n")
-		}
-		return sb.String(), nil
-
-	default:
-		return "", fmt.Errorf("unsupported format: %s. Supported formats: raw, json, text", format)
+	if err := f.validate(); err != nil {
+		return "", err
 	}
+
+	switch f {
+	case FormatJSON:
+		return marshalIndentJSON(result)
+	case FormatText:
+		return renderText(streams), nil
+	default: // FormatRaw
+		return renderRaw(streams), nil
+	}
+}
+
+// renderEmptyStreams renders a successful query that matched no logs. The json
+// form only marshals the response when there are warnings to convey.
+func renderEmptyStreams(result *loghttp.QueryResponse, f Format) (string, error) {
+	if f != FormatJSON {
+		return "No logs found matching the query", nil
+	}
+	if len(result.Warnings) > 0 {
+		return marshalIndentJSON(result)
+	}
+	return "{\"message\": \"No logs found matching the query\"}", nil
+}
+
+// renderRaw writes one line per entry as "<timestamp> [<labels> ]<line>".
+func renderRaw(streams loghttp.Streams) string {
+	var sb strings.Builder
+	for _, stream := range streams {
+		labels := stream.Labels.String()
+		if labels != "{}" {
+			labels += " "
+		} else {
+			labels = ""
+		}
+
+		for _, entry := range stream.Entries {
+			timestamp := entry.Timestamp.Format(time.RFC3339)
+			fmt.Fprintf(&sb, "%s %s%s\n", timestamp, labels, entry.Line)
+		}
+	}
+	return sb.String()
+}
+
+// renderText writes a numbered, per-stream listing of the entries.
+func renderText(streams loghttp.Streams) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Found %d streams:\n\n", len(streams))
+
+	for i, stream := range streams {
+		fmt.Fprintf(&sb, "Stream %s %d:\n", stream.Labels.String(), i+1)
+
+		for _, entry := range stream.Entries {
+			fmt.Fprintf(&sb, "[%s] %s\n", entry.Timestamp.Format(time.RFC3339), entry.Line)
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // formatLokiLabelsResults formats the Loki labels results into a readable string
 func formatLokiLabelsResults(result *loghttp.LabelResponse, format string) (string, error) {
+	f := Format(format)
+
+	// Runs before format validation, matching the query formatter.
 	if len(result.Data) == 0 {
-		switch format {
-		case "json":
+		if f == FormatJSON {
 			return "{\"message\": \"No labels found\"}", nil
-		default:
-			return "No labels found", nil
 		}
+		return "No labels found", nil
 	}
 
-	switch format {
-	case "json":
-		// Return raw JSON response
-		jsonBytes, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal JSON: %w", err)
-		}
-		return string(jsonBytes), nil
+	if err := f.validate(); err != nil {
+		return "", err
+	}
 
-	case "raw":
-		// Return raw label names only, one per line
-		var sb strings.Builder
-		for _, label := range result.Data {
-			sb.WriteString(label)
-			sb.WriteString("\n")
-		}
-		return sb.String(), nil
-
-	case "text":
-		// Return formatted text with numbering (original behavior)
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "Found %d labels:\n\n", len(result.Data))
-
-		for i, label := range result.Data {
-			fmt.Fprintf(&sb, "%d. %s\n", i+1, label)
-		}
-		return sb.String(), nil
-
-	default:
-		return "", fmt.Errorf("unsupported format: %s. Supported formats: raw, json, text", format)
+	switch f {
+	case FormatJSON:
+		return marshalIndentJSON(result)
+	case FormatText:
+		return renderNumberedList(fmt.Sprintf("Found %d labels:\n\n", len(result.Data)), result.Data), nil
+	default: // FormatRaw
+		return renderLines(result.Data), nil
 	}
 }
 
 // formatLokiLabelValuesResults formats the Loki label values results into a readable string
 func formatLokiLabelValuesResults(labelName string, result *loghttp.LabelResponse, format string) (string, error) {
+	f := Format(format)
+
+	// Runs before format validation, matching the query formatter.
 	if len(result.Data) == 0 {
-		switch format {
-		case "json":
+		if f == FormatJSON {
 			return fmt.Sprintf("{\"message\": \"No values found for label '%s'\"}", labelName), nil
-		default:
-			return fmt.Sprintf("No values found for label '%s'", labelName), nil
 		}
+		return fmt.Sprintf("No values found for label '%s'", labelName), nil
 	}
 
-	switch format {
-	case "json":
-		// Return raw JSON response
-		jsonBytes, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal JSON: %w", err)
-		}
-		return string(jsonBytes), nil
-
-	case "raw":
-		// Return raw label values only, one per line
-		var sb strings.Builder
-		for _, value := range result.Data {
-			sb.WriteString(value)
-			sb.WriteString("\n")
-		}
-		return sb.String(), nil
-
-	case "text":
-		// Return formatted text with numbering (original behavior)
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "Found %d values for label '%s':\n\n", len(result.Data), labelName)
-
-		for i, value := range result.Data {
-			fmt.Fprintf(&sb, "%d. %s\n", i+1, value)
-		}
-		return sb.String(), nil
-
-	default:
-		return "", fmt.Errorf("unsupported format: %s. Supported formats: raw, json, text", format)
+	if err := f.validate(); err != nil {
+		return "", err
 	}
+
+	switch f {
+	case FormatJSON:
+		return marshalIndentJSON(result)
+	case FormatText:
+		header := fmt.Sprintf("Found %d values for label '%s':\n\n", len(result.Data), labelName)
+		return renderNumberedList(header, result.Data), nil
+	default: // FormatRaw
+		return renderLines(result.Data), nil
+	}
+}
+
+// renderLines writes one item per line.
+func renderLines(items []string) string {
+	var sb strings.Builder
+	for _, item := range items {
+		sb.WriteString(item)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// renderNumberedList writes header followed by a 1-based numbered list.
+func renderNumberedList(header string, items []string) string {
+	var sb strings.Builder
+	sb.WriteString(header)
+
+	for i, item := range items {
+		fmt.Fprintf(&sb, "%d. %s\n", i+1, item)
+	}
+	return sb.String()
 }

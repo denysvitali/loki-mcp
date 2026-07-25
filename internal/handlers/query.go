@@ -20,48 +20,64 @@ func HandleLokiQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 	}
 	params.applyDefaults()
 
-	// Validate head/tail mutual exclusivity
 	if params.Head > 0 && params.Tail > 0 {
 		return nil, fmt.Errorf("head and tail parameters are mutually exclusive")
 	}
 
-	// Apply query filter if configured
-	if cfg := GetFilterConfig(); cfg != nil {
-		mergedQuery, err := MergeQueryWithFilter(params.Query, cfg.Matchers)
-		if err != nil {
-			return nil, fmt.Errorf("failed to apply query filter: %w", err)
-		}
-		params.Query = mergedQuery
+	if err := applyQueryFilter(&params); err != nil {
+		return nil, err
 	}
 
-	// Set defaults for optional time parameters
-	start := time.Now().Add(-DefaultLookback)
-	end := time.Now()
+	start, end, err := resolveTimeRange(&params)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := runQueryRange(ctx, &params, start, end)
+	if err != nil {
+		return nil, err
+	}
+
+	// Secret filtering runs before formatting so raw, text and JSON output all
+	// use the sanitized data.
+	secretSummary := applyPostProcessing(ctx, result, &params)
+
+	formattedResult, err := formatLokiResults(result, params.Format)
+	if err != nil {
+		return nil, fmt.Errorf("failed to format results: %w", err)
+	}
+	if secretSummary.LinesOmitted > 0 && Format(params.Format) != FormatJSON {
+		formattedResult += "\n" + formatSecretOmissionNote(secretSummary.LinesOmitted)
+	}
+
+	return mcp.NewToolResultText(formattedResult), nil
+}
+
+// applyQueryFilter ANDs the configured stream selector into the client query.
+// It is a no-op when no filter is configured.
+func applyQueryFilter(params *LokiParams) error {
+	cfg := GetFilterConfig()
+	if cfg == nil {
+		return nil
+	}
+
+	mergedQuery, err := MergeQueryWithFilter(params.Query, cfg.Matchers)
+	if err != nil {
+		return fmt.Errorf("failed to apply query filter: %w", err)
+	}
+	params.Query = mergedQuery
+	return nil
+}
+
+// runQueryRange executes the range query against Loki inside a span.
+func runQueryRange(ctx context.Context, params *LokiParams, start, end time.Time) (*loghttp.QueryResponse, error) {
 	limit := DefaultQueryLimit
-
-	// Override defaults if parameters are provided
-	if params.Start != "" {
-		startTime, err := parseTime(params.Start)
-		if err != nil {
-			return nil, fmt.Errorf("invalid start time: %w", err)
-		}
-		start = startTime
-	}
-
-	if params.End != "" {
-		endTime, err := parseTime(params.End)
-		if err != nil {
-			return nil, fmt.Errorf("invalid end time: %w", err)
-		}
-		end = endTime
-	}
-
 	if params.Limit > 0 {
+		// JSON numbers arrive as float64; fractional limits truncate.
 		limit = int(params.Limit)
 	}
 
-	// Create Loki client and execute query
-	lokiClient := newLokiClient(&params)
+	lokiClient := newLokiClient(params)
 
 	_, span := telemetry.StartSpan(ctx, "loki.query_range")
 	result, err := lokiClient.QueryRange(
@@ -78,49 +94,51 @@ func HandleLokiQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
+	return result, nil
+}
 
-	var secretSummary SecretFilterSummary
-
-	// Apply post-processing filters if any are specified. Secret filtering runs
-	// before formatting so raw, text, and JSON output all use the sanitized data.
-	if params.Filter != "" || params.Head > 0 || params.Tail > 0 || secretFilteringEnabled() {
-		streams, ok := result.Data.Result.(loghttp.Streams)
-		if ok && len(streams) > 0 {
-			// Collect and sort all entries by timestamp
-			entries := collectAndSortEntries(streams)
-
-			// Apply keyword filter
-			if params.Filter != "" {
-				entries = filterEntries(entries, params.Filter, params.FilterCaseSensitive)
-			}
-
-			// Omit any lines that contain secrets before output limiting.
-			entries, secretSummary = filterSecretEntries(ctx, entries)
-			if secretSummary.LinesOmitted > 0 {
-				telemetry.RecordSecretFiltering(ctx, secretSummary.Findings, secretSummary.LinesOmitted)
-				result.Warnings = append(result.Warnings, formatSecretOmissionNote(secretSummary.LinesOmitted))
-			}
-
-			// Apply head/tail
-			if params.Head > 0 || params.Tail > 0 {
-				entries = applyHeadTail(entries, int(params.Head), int(params.Tail))
-			}
-
-			// Convert back to streams format
-			result.Data.Result = entriesToStreams(entries)
-		}
+// applyPostProcessing rewrites result in place with the filtered, secret-scanned
+// and head/tail-limited entries, and returns a summary of what was omitted.
+// Non-stream and empty results are left untouched.
+func applyPostProcessing(ctx context.Context, result *loghttp.QueryResponse, params *LokiParams) SecretFilterSummary {
+	if params.Filter == "" && params.Head <= 0 && params.Tail <= 0 && !secretFilteringEnabled() {
+		return SecretFilterSummary{}
 	}
 
-	// Format results
-	formattedResult, err := formatLokiResults(result, params.Format)
-	if err != nil {
-		return nil, fmt.Errorf("failed to format results: %w", err)
-	}
-	if secretSummary.LinesOmitted > 0 && params.Format != "json" {
-		formattedResult += "\n" + formatSecretOmissionNote(secretSummary.LinesOmitted)
+	streams, ok := result.Data.Result.(loghttp.Streams)
+	if !ok || len(streams) == 0 {
+		return SecretFilterSummary{}
 	}
 
-	return mcp.NewToolResultText(formattedResult), nil
+	processed, summary := postProcessStreams(ctx, streams, params)
+	result.Data.Result = processed
+
+	if summary.LinesOmitted > 0 {
+		telemetry.RecordSecretFiltering(ctx, summary.Findings, summary.LinesOmitted)
+		result.Warnings = append(result.Warnings, formatSecretOmissionNote(summary.LinesOmitted))
+	}
+
+	return summary
+}
+
+// postProcessStreams flattens streams into a time-ordered entry list, applies
+// the keyword filter, drops lines containing secrets, applies head/tail and
+// regroups the survivors back into streams.
+func postProcessStreams(ctx context.Context, streams loghttp.Streams, params *LokiParams) (loghttp.Streams, SecretFilterSummary) {
+	entries := collectAndSortEntries(streams)
+
+	if params.Filter != "" {
+		entries = filterEntries(entries, params.Filter, params.FilterCaseSensitive)
+	}
+
+	// Omit any lines that contain secrets before output limiting.
+	entries, summary := filterSecretEntries(ctx, entries)
+
+	if params.Head > 0 || params.Tail > 0 {
+		entries = applyHeadTail(entries, int(params.Head), int(params.Tail))
+	}
+
+	return entriesToStreams(entries), summary
 }
 
 func secretFilteringEnabled() bool {

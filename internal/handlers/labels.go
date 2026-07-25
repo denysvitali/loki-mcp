@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/grafana/loki/v3/pkg/loghttp"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -17,29 +16,12 @@ func HandleLokiLabelNames(ctx context.Context, request mcp.CallToolRequest) (*mc
 	}
 	params.applyDefaults()
 
-	// Set defaults for optional time parameters
-	start := time.Now().Add(-DefaultLookback)
-	end := time.Now()
-
-	// Override defaults if parameters are provided
-	if params.Start != "" {
-		startTime, err := parseTime(params.Start)
-		if err != nil {
-			return nil, fmt.Errorf("invalid start time: %w", err)
-		}
-		start = startTime
-	}
-
-	if params.End != "" {
-		endTime, err := parseTime(params.End)
-		if err != nil {
-			return nil, fmt.Errorf("invalid end time: %w", err)
-		}
-		end = endTime
+	start, end, err := resolveTimeRange(&params)
+	if err != nil {
+		return nil, err
 	}
 
 	var result *loghttp.LabelResponse
-	var err error
 
 	// Use HTTP client with query filter if configured
 	if cfg := GetFilterConfig(); cfg != nil {
@@ -71,29 +53,12 @@ func HandleLokiLabelValues(ctx context.Context, request mcp.CallToolRequest) (*m
 	}
 	params.applyDefaults()
 
-	// Set defaults for optional time parameters
-	start := time.Now().Add(-DefaultLookback)
-	end := time.Now()
-
-	// Override defaults if parameters are provided
-	if params.Start != "" {
-		startTime, err := parseTime(params.Start)
-		if err != nil {
-			return nil, fmt.Errorf("invalid start time: %w", err)
-		}
-		start = startTime
-	}
-
-	if params.End != "" {
-		endTime, err := parseTime(params.End)
-		if err != nil {
-			return nil, fmt.Errorf("invalid end time: %w", err)
-		}
-		end = endTime
+	start, end, err := resolveTimeRange(&params)
+	if err != nil {
+		return nil, err
 	}
 
 	var result *loghttp.LabelResponse
-	var err error
 
 	// Use HTTP client with query filter if configured
 	if cfg := GetFilterConfig(); cfg != nil {
