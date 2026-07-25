@@ -2,15 +2,135 @@ version: "2"
 
 run:
   timeout: 5m
+  # Without this the //go:build integration files are invisible to every
+  # linter; internal/handlers/loki_integration_test.go is the largest file in
+  # the tree.
+  build-tags:
+    - integration
 
 linters:
   enable:
-    - govet
+    # correctness
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - copyloopvar
     - errcheck
-    - staticcheck
+    - errorlint
+    - govet
     - ineffassign
+    - makezero
+    - nilerr
+    - noctx
+    - staticcheck
+    - unconvert
     - unused
+    # complexity budget — see docs/refactor-report.md for the measured baseline
+    - dupl
+    - funlen
+    - gocognit
+    - gocritic
+    - gocyclo
+    - nestif
+    - revive
+    # tests
+    - thelper
+    - tparallel
+    # house rules
+    - depguard
+    - forbidigo
     - misspell
+  # paralleltest is deliberately NOT enabled: cmd, internal/logging and parts of
+  # internal/handlers are intentionally serial (viper, logrus and the
+  # betterleaks/tiktoken globals race under t.Parallel), so the linter would
+  # need blanket per-package exclusions that make it meaningless.
+
+  settings:
+    gocognit:
+      min-complexity: 15
+    gocyclo:
+      min-complexity: 12
+    funlen:
+      lines: 60
+      statements: 40
+    dupl:
+      threshold: 100
+    nestif:
+      min-complexity: 4
+
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^sync\.(Mutex|RWMutex)$
+          msg: >-
+            Shared mutable state behind a lock is the default footgun this
+            codebase removed; see docs/architecture.md ("Concurrency model")
+            and docs/adr/0002-telemetry-shutdown-registry-keeps-a-mutex.md.
+            Prefer giving the state a single owning goroutine, an immutable
+            value built once at startup, or sync/atomic (atomic.Pointer for a
+            read-mostly snapshot). If a lock really is the right answer, add
+            //nolint:forbidigo with a one-line comment naming the fields it
+            guards and the lock ordering.
+
+    depguard:
+      rules:
+        # The documented dependency direction (docs/architecture.md):
+        #   main -> cmd -> internal/server -> internal/handlers
+        #        -> internal/telemetry -> internal/logging
+        # Skipping levels is allowed; going left is not.
+        logging:
+          files:
+            - '**/internal/logging/*.go'
+          deny:
+            - pkg: github.com/kaiko-ai/loki-mcp/internal/handlers
+              desc: internal/logging is the leaf of the chain and must not import handlers (docs/architecture.md, "Dependency direction")
+            - pkg: github.com/kaiko-ai/loki-mcp/internal/server
+              desc: internal/logging is the leaf of the chain and must not import server (docs/architecture.md, "Dependency direction")
+            - pkg: github.com/kaiko-ai/loki-mcp/internal/telemetry
+              desc: telemetry imports logging, not the other way round (docs/architecture.md, "Dependency direction")
+            - pkg: github.com/kaiko-ai/loki-mcp/cmd
+              desc: internal/logging must not import the command layer (docs/architecture.md, "Dependency direction")
+        telemetry:
+          files:
+            - '**/internal/telemetry/*.go'
+          deny:
+            - pkg: github.com/kaiko-ai/loki-mcp/internal/handlers
+              desc: internal/telemetry sits below handlers; the tool middleware is handed to the server instead (docs/architecture.md, "Dependency direction")
+            - pkg: github.com/kaiko-ai/loki-mcp/internal/server
+              desc: internal/telemetry sits below server; the tool middleware is handed to the server instead (docs/architecture.md, "Dependency direction")
+            - pkg: github.com/kaiko-ai/loki-mcp/cmd
+              desc: internal/telemetry must not import the command layer (docs/architecture.md, "Dependency direction")
+        handlers:
+          files:
+            - '**/internal/handlers/*.go'
+          deny:
+            - pkg: github.com/kaiko-ai/loki-mcp/internal/server
+              desc: internal/handlers holds Loki logic only; transport belongs to internal/server, which imports handlers (docs/architecture.md, "Dependency direction")
+            - pkg: github.com/kaiko-ai/loki-mcp/cmd
+              desc: internal/handlers must not import the command layer; configuration is injected as handlers.Config (docs/adr/0001-injected-handler-config.md)
+        server:
+          files:
+            - '**/internal/server/*.go'
+          deny:
+            - pkg: github.com/kaiko-ai/loki-mcp/cmd
+              desc: internal/server must not import the command layer; cmd wires the server (docs/architecture.md, "Dependency direction")
+
+  exclusions:
+    rules:
+      # Table-driven tests are long and repetitive on purpose: the cases are
+      # data, and splitting them hides what is being asserted.
+      - path: _test\.go
+        linters:
+          - dupl
+          - funlen
+          - gocognit
+          - gocyclo
+          - nestif
+      # Test helpers legitimately use a mutex to collect output from the
+      # goroutines they drive; the production ban does not apply to them.
+      - path: _test\.go
+        linters:
+          - forbidigo
 
 formatters:
   enable:

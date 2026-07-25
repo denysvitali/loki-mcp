@@ -26,3 +26,7 @@ COPY --from=builder /out/loki-mcp .
 EXPOSE 8080
 
 ENTRYPOINT ["./loki-mcp"]
+
+# Serve HTTP on $PORT (default 8080) by default; `docker run -i <image> stdio`
+# overrides this for the stdio transport.
+CMD ["http"]

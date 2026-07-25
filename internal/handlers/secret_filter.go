@@ -3,63 +3,28 @@ package handlers
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/betterleaks/betterleaks/detect"
 )
 
-// SecretFilterConfig holds the global secret filtering configuration.
-type SecretFilterConfig struct {
-	Enabled  bool
-	detector *detect.Detector
-}
-
-// SecretFilterSummary describes content omitted from tool output.
+// SecretFilterSummary counts what a secret scan removed. The zero value means
+// nothing was removed, and is what callers get when secret filtering is off,
+// when there was nothing to scan, or when every line was clean.
 type SecretFilterSummary struct {
+	// LinesOmitted is the number of log lines dropped from the response. It
+	// is the number the user-facing note reports.
 	LinesOmitted int
-	Findings     int
+	// Findings is the total number of rule matches across those lines, so it
+	// is >= LinesOmitted whenever LinesOmitted > 0: one line can trip several
+	// rules. It feeds the metrics, not the note.
+	Findings int
 }
 
-var (
-	secretFilterConfig *SecretFilterConfig
-	secretFilterMu     sync.RWMutex
-)
-
-// InitializeSecretFilterConfig creates the shared detector used to scan returned logs.
-func InitializeSecretFilterConfig(enabled bool) error {
-	cfg := &SecretFilterConfig{Enabled: enabled}
-	if enabled {
-		detector, err := detect.NewDetectorDefaultConfig()
-		if err != nil {
-			return fmt.Errorf("initialize secret detector: %w", err)
-		}
-		detector.SkipFindingAppend = true
-		cfg.detector = detector
-	}
-
-	secretFilterMu.Lock()
-	defer secretFilterMu.Unlock()
-	secretFilterConfig = cfg
-	return nil
-}
-
-// GetSecretFilterConfig returns the current secret filter configuration.
-func GetSecretFilterConfig() *SecretFilterConfig {
-	secretFilterMu.RLock()
-	defer secretFilterMu.RUnlock()
-	return secretFilterConfig
-}
-
-// ResetSecretFilterConfig clears the secret filter configuration (for testing).
-func ResetSecretFilterConfig() {
-	secretFilterMu.Lock()
-	defer secretFilterMu.Unlock()
-	secretFilterConfig = nil
-}
-
-func filterSecretEntries(ctx context.Context, entries []logEntry) ([]logEntry, SecretFilterSummary) {
-	cfg := GetSecretFilterConfig()
-	if cfg == nil || !cfg.Enabled || cfg.detector == nil || len(entries) == 0 {
+// filterSecretEntries drops every entry whose line matches a secret rule. A nil
+// detector disables filtering. The scan is CPU-bound, so it polls ctx: a
+// cancelled context returns the entries filtered so far.
+func filterSecretEntries(ctx context.Context, detector *detect.Detector, entries []logEntry) ([]logEntry, SecretFilterSummary) {
+	if detector == nil || len(entries) == 0 {
 		return entries, SecretFilterSummary{}
 	}
 
@@ -72,7 +37,7 @@ func filterSecretEntries(ctx context.Context, entries []logEntry) ([]logEntry, S
 		default:
 		}
 
-		findings := cfg.detector.DetectString(entry.Line)
+		findings := detector.DetectString(entry.Line)
 		if len(findings) > 0 {
 			summary.LinesOmitted++
 			summary.Findings += len(findings)
@@ -84,6 +49,9 @@ func filterSecretEntries(ctx context.Context, entries []logEntry) ([]logEntry, S
 	return filtered, summary
 }
 
+// formatSecretOmissionNote renders the user-facing count, singular for one
+// line. The wording is asserted verbatim by tests and appears both in rendered
+// raw/text output and in the JSON response's Warnings array.
 func formatSecretOmissionNote(lines int) string {
 	if lines == 1 {
 		return "1 line omitted due to detected secrets"

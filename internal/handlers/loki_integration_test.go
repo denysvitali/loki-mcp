@@ -96,7 +96,7 @@ func PushLogs(ctx context.Context, lokiURL string, streams []LokiStream) error {
 	if err != nil {
 		return fmt.Errorf("failed to push logs: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -165,6 +165,8 @@ func TestMain(m *testing.M) {
 // ============================================================================
 
 func TestIntegration_LokiQuery_BasicQuery(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -199,8 +201,8 @@ func TestIntegration_LokiQuery_BasicQuery(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "Found 1 streams", "Should find 1 stream")
@@ -210,6 +212,8 @@ func TestIntegration_LokiQuery_BasicQuery(t *testing.T) {
 }
 
 func TestIntegration_LokiQuery_EmptyResults(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -222,14 +226,16 @@ func TestIntegration_LokiQuery_EmptyResults(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "No logs found", "Should indicate no logs found")
 }
 
 func TestIntegration_LokiQuery_MultipleStreams(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -273,8 +279,8 @@ func TestIntegration_LokiQuery_MultipleStreams(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "Found 2 streams", "Should find 2 streams")
@@ -283,6 +289,8 @@ func TestIntegration_LokiQuery_MultipleStreams(t *testing.T) {
 }
 
 func TestIntegration_LokiQuery_WithLimit(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -322,8 +330,8 @@ func TestIntegration_LokiQuery_WithLimit(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	// Count log entries (each line is a log entry in raw format)
@@ -332,6 +340,8 @@ func TestIntegration_LokiQuery_WithLimit(t *testing.T) {
 }
 
 func TestIntegration_LokiQuery_RawFormat(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -362,8 +372,8 @@ func TestIntegration_LokiQuery_RawFormat(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	// Raw format: timestamp labels message
@@ -374,6 +384,8 @@ func TestIntegration_LokiQuery_RawFormat(t *testing.T) {
 }
 
 func TestIntegration_LokiQuery_JSONFormat(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -403,8 +415,8 @@ func TestIntegration_LokiQuery_JSONFormat(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 
@@ -419,6 +431,8 @@ func TestIntegration_LokiQuery_JSONFormat(t *testing.T) {
 }
 
 func TestIntegration_LokiQuery_TextFormat(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -448,8 +462,8 @@ func TestIntegration_LokiQuery_TextFormat(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "Found", "Text format should contain 'Found'")
@@ -462,6 +476,8 @@ func TestIntegration_LokiQuery_TextFormat(t *testing.T) {
 // ============================================================================
 
 func TestIntegration_LokiLabelNames_Basic(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -493,8 +509,8 @@ func TestIntegration_LokiLabelNames_Basic(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiLabelNames(ctx, request)
-	require.NoError(t, err, "HandleLokiLabelNames failed")
+	result, err := h.HandleLabelNames(ctx, request)
+	require.NoError(t, err, "HandleLabelNames failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "job", "Should contain 'job' label")
@@ -502,6 +518,8 @@ func TestIntegration_LokiLabelNames_Basic(t *testing.T) {
 }
 
 func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -531,6 +549,7 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 		{
 			format: "raw",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				// Raw format: one label per line
 				assert.Contains(t, text, "job", "Raw format should contain 'job'")
 			},
@@ -538,6 +557,7 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 		{
 			format: "json",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				var jsonResult map[string]interface{}
 				err := json.Unmarshal([]byte(text), &jsonResult)
 				require.NoError(t, err, "JSON format should be valid JSON")
@@ -548,6 +568,7 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 		{
 			format: "text",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				assert.Contains(t, text, "Found", "Text format should contain 'Found'")
 				assert.Contains(t, text, "labels", "Text format should contain 'labels'")
 			},
@@ -563,8 +584,8 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 				"end":    "now",
 			})
 
-			result, err := HandleLokiLabelNames(ctx, request)
-			require.NoError(t, err, "HandleLokiLabelNames failed")
+			result, err := h.HandleLabelNames(ctx, request)
+			require.NoError(t, err, "HandleLabelNames failed")
 
 			text := extractTextContent(result)
 			tc.validate(t, text)
@@ -577,6 +598,8 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 // ============================================================================
 
 func TestIntegration_LokiLabelValues_Basic(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -616,8 +639,8 @@ func TestIntegration_LokiLabelValues_Basic(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiLabelValues(ctx, request)
-	require.NoError(t, err, "HandleLokiLabelValues failed")
+	result, err := h.HandleLabelValues(ctx, request)
+	require.NoError(t, err, "HandleLabelValues failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "values-job-1", "Should contain first job value")
@@ -625,6 +648,8 @@ func TestIntegration_LokiLabelValues_Basic(t *testing.T) {
 }
 
 func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
+	h := newTestHandlers(t)
+
 	ctx := context.Background()
 	testID := UniqueTestID()
 
@@ -654,6 +679,7 @@ func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
 		{
 			format: "raw",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				// Raw format: one value per line
 				lines := strings.Split(strings.TrimSpace(text), "\n")
 				assert.Greater(t, len(lines), 0, "Raw format should have at least one value")
@@ -662,6 +688,7 @@ func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
 		{
 			format: "json",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				var jsonResult map[string]interface{}
 				err := json.Unmarshal([]byte(text), &jsonResult)
 				require.NoError(t, err, "JSON format should be valid JSON")
@@ -672,6 +699,7 @@ func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
 		{
 			format: "text",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				assert.Contains(t, text, "Found", "Text format should contain 'Found'")
 				assert.Contains(t, text, "values for label", "Text format should contain 'values for label'")
 			},
@@ -688,8 +716,8 @@ func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
 				"end":    "now",
 			})
 
-			result, err := HandleLokiLabelValues(ctx, request)
-			require.NoError(t, err, "HandleLokiLabelValues failed")
+			result, err := h.HandleLabelValues(ctx, request)
+			require.NoError(t, err, "HandleLabelValues failed")
 
 			text := extractTextContent(result)
 			tc.validate(t, text)
@@ -736,10 +764,9 @@ func TestIntegration_QueryFilter_RestrictsQueryResults(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Set up query filter to only allow "allowed" namespace
-	ResetFilterConfig()
-	err = InitializeFilterConfig(fmt.Sprintf(`{namespace="allowed", test_id="%s"}`, testID))
-	require.NoError(t, err, "Failed to initialize filter config")
-	defer ResetFilterConfig()
+	cfg, err := NewConfig(fmt.Sprintf(`{namespace="allowed", test_id="%s"}`, testID), false)
+	require.NoError(t, err, "Failed to build handler config")
+	h := New(cfg)
 
 	// Query for all logs with the test ID - filter should restrict results
 	request := NewCallToolRequest("loki_query", map[string]interface{}{
@@ -750,8 +777,8 @@ func TestIntegration_QueryFilter_RestrictsQueryResults(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "Allowed namespace log", "Should contain allowed namespace log")
@@ -803,10 +830,9 @@ func TestIntegration_QueryFilter_MergesWithClientQuery(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Set up query filter for prod namespace
-	ResetFilterConfig()
-	err = InitializeFilterConfig(fmt.Sprintf(`{namespace="prod", test_id="%s"}`, testID))
-	require.NoError(t, err, "Failed to initialize filter config")
-	defer ResetFilterConfig()
+	cfg, err := NewConfig(fmt.Sprintf(`{namespace="prod", test_id="%s"}`, testID), false)
+	require.NoError(t, err, "Failed to build handler config")
+	h := New(cfg)
 
 	// Client queries for job="api" - should only get prod-api, not staging-api
 	request := NewCallToolRequest("loki_query", map[string]interface{}{
@@ -817,8 +843,8 @@ func TestIntegration_QueryFilter_MergesWithClientQuery(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "prod-api log", "Should contain prod-api log")
@@ -863,10 +889,9 @@ func TestIntegration_QueryFilter_LabelNamesRespectFilter(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Set up query filter for filtered-ns namespace
-	ResetFilterConfig()
-	err = InitializeFilterConfig(fmt.Sprintf(`{namespace="filtered-ns", test_id="%s"}`, testID))
-	require.NoError(t, err, "Failed to initialize filter config")
-	defer ResetFilterConfig()
+	cfg, err := NewConfig(fmt.Sprintf(`{namespace="filtered-ns", test_id="%s"}`, testID), false)
+	require.NoError(t, err, "Failed to build handler config")
+	h := New(cfg)
 
 	request := NewCallToolRequest("loki_label_names", map[string]interface{}{
 		"url":    lokiContainer.Endpoint,
@@ -875,8 +900,8 @@ func TestIntegration_QueryFilter_LabelNamesRespectFilter(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiLabelNames(ctx, request)
-	require.NoError(t, err, "HandleLokiLabelNames failed")
+	result, err := h.HandleLabelNames(ctx, request)
+	require.NoError(t, err, "HandleLabelNames failed")
 
 	text := extractTextContent(result)
 	// Should contain unique_label_one from filtered-ns but not unique_label_two from other-ns
@@ -919,10 +944,9 @@ func TestIntegration_QueryFilter_LabelValuesRespectFilter(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Set up query filter
-	ResetFilterConfig()
-	err = InitializeFilterConfig(fmt.Sprintf(`{namespace="filter-test-ns", test_id="%s"}`, testID))
-	require.NoError(t, err, "Failed to initialize filter config")
-	defer ResetFilterConfig()
+	cfg, err := NewConfig(fmt.Sprintf(`{namespace="filter-test-ns", test_id="%s"}`, testID), false)
+	require.NoError(t, err, "Failed to build handler config")
+	h := New(cfg)
 
 	request := NewCallToolRequest("loki_label_values", map[string]interface{}{
 		"label":  "job",
@@ -932,8 +956,8 @@ func TestIntegration_QueryFilter_LabelValuesRespectFilter(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiLabelValues(ctx, request)
-	require.NoError(t, err, "HandleLokiLabelValues failed")
+	result, err := h.HandleLabelValues(ctx, request)
+	require.NoError(t, err, "HandleLabelValues failed")
 
 	text := extractTextContent(result)
 	// Should contain job value from filtered namespace but not from other namespace
@@ -976,7 +1000,7 @@ func TestIntegration_QueryFilter_NoFilterReturnsAll(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Ensure no filter is configured
-	ResetFilterConfig()
+	h := newTestHandlers(t)
 
 	// Query for all logs with the test ID - should get both namespaces
 	request := NewCallToolRequest("loki_query", map[string]interface{}{
@@ -987,8 +1011,8 @@ func TestIntegration_QueryFilter_NoFilterReturnsAll(t *testing.T) {
 		"end":    "now",
 	})
 
-	result, err := HandleLokiQuery(ctx, request)
-	require.NoError(t, err, "HandleLokiQuery failed")
+	result, err := h.HandleQuery(ctx, request)
+	require.NoError(t, err, "HandleQuery failed")
 
 	text := extractTextContent(result)
 	assert.Contains(t, text, "namespace one log", "Should contain namespace one log")

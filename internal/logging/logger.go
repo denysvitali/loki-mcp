@@ -1,3 +1,30 @@
+// Package logging owns the single logrus logger shared by every package in
+// this binary.
+//
+// # All output goes to stderr
+//
+// The logger writes to os.Stderr and nothing in this package ever moves it.
+// In stdio transport mode the MCP JSON-RPC stream owns os.Stdout, so a single
+// log line written there corrupts the protocol and the client disconnects.
+// Init therefore adjusts only the level and the formatter; it deliberately
+// never calls SetOutput. Any future change here must keep the destination on
+// stderr — logger_test.go fails loudly if it does not.
+//
+// # What belongs here
+//
+// Logger construction and configuration only: the level/format wiring behind
+// the --log-level and --log-format flags, hook registration (used to bridge
+// records into OpenTelemetry), and the leveled wrappers callers use instead
+// of holding a logger value. Deciding what to log, and with which fields,
+// belongs in the calling package.
+//
+// # Concurrency
+//
+// A *logrus.Logger is safe for concurrent use, so the leveled wrappers may be
+// called from any goroutine. The package-level logger is built once by init
+// and afterwards mutated only by Init and AddHook, both of which are expected
+// to run during startup, before any goroutine that logs is started. The
+// logger variable itself is never reassigned after init.
 package logging
 
 import (
@@ -6,36 +33,50 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Logger is the global logger instance
-var Logger *logrus.Logger
+// logger is the process-wide logrus instance. It stays private: callers use
+// the package-level wrappers below, which guarantees there is exactly one
+// output destination to reason about.
+var logger *logrus.Logger
 
 func init() {
-	Logger = logrus.New()
+	logger = logrus.New()
 	// Default to stderr - critical for stdio mode where stdout is MCP protocol
-	Logger.SetOutput(os.Stderr)
-	Logger.SetLevel(logrus.InfoLevel)
-	Logger.SetFormatter(&logrus.TextFormatter{
+	logger.SetOutput(os.Stderr)
+	logger.SetLevel(logrus.InfoLevel)
+	logger.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
 }
 
-// Init initializes the logger with the given level and format
+// Init applies the configured level and output format to the process-wide
+// logger. It is meant to be called once, from startup, before anything logs.
+//
+// Guarantees:
+//   - The output destination is never touched: logs keep going to stderr.
+//   - level is parsed by logrus.ParseLevel ("debug", "info", "warn",
+//     "error", ...). On an unparseable level Init returns that error and
+//     changes nothing at all — neither the level nor the formatter — so the
+//     caller can report the error and keep using the logger.
+//   - format "json" selects logrus.JSONFormatter. Every other value,
+//     including the empty string and typos, selects the text formatter; an
+//     unknown format is not an error.
+//   - Both formatters timestamp with layout 2006-01-02T15:04:05.000Z07:00.
 func Init(level, format string) error {
 	// Parse and set log level
 	lvl, err := logrus.ParseLevel(level)
 	if err != nil {
 		return err
 	}
-	Logger.SetLevel(lvl)
+	logger.SetLevel(lvl)
 
 	// Set formatter
 	switch format {
 	case "json":
-		Logger.SetFormatter(&logrus.JSONFormatter{
+		logger.SetFormatter(&logrus.JSONFormatter{
 			TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
 		})
 	default:
-		Logger.SetFormatter(&logrus.TextFormatter{
+		logger.SetFormatter(&logrus.TextFormatter{
 			FullTimestamp:   true,
 			TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
 		})
@@ -44,67 +85,37 @@ func Init(level, format string) error {
 	return nil
 }
 
-// AddHook adds a hook to the global logger.
+// AddHook registers hook on the process-wide logger.
+//
+// The hook fires synchronously for every subsequent record whose level is
+// listed in hook.Levels(), in addition to the record being written to stderr;
+// records emitted before the call are not replayed. Hooks cannot be removed,
+// so register them once at startup. A hook that blocks blocks the caller of
+// the log statement.
 func AddHook(hook logrus.Hook) {
-	Logger.AddHook(hook)
+	logger.AddHook(hook)
 }
 
-// Debug logs a debug message
-func Debug(args ...any) {
-	Logger.Debug(args...)
-}
-
-// Debugf logs a formatted debug message
-func Debugf(format string, args ...any) {
-	Logger.Debugf(format, args...)
-}
-
-// Info logs an info message
+// Info writes args to stderr at info level, formatted like fmt.Sprint.
+// The record is dropped if the configured level is above info.
 func Info(args ...any) {
-	Logger.Info(args...)
+	logger.Info(args...)
 }
 
-// Infof logs a formatted info message
+// Infof writes a fmt.Sprintf-formatted record to stderr at info level.
+// The record is dropped if the configured level is above info.
 func Infof(format string, args ...any) {
-	Logger.Infof(format, args...)
+	logger.Infof(format, args...)
 }
 
-// Warn logs a warning message
+// Warn writes args to stderr at warning level, formatted like fmt.Sprint.
+// The record is dropped if the configured level is above warning.
 func Warn(args ...any) {
-	Logger.Warn(args...)
+	logger.Warn(args...)
 }
 
-// Warnf logs a formatted warning message
-func Warnf(format string, args ...any) {
-	Logger.Warnf(format, args...)
-}
-
-// Error logs an error message
-func Error(args ...any) {
-	Logger.Error(args...)
-}
-
-// Errorf logs a formatted error message
+// Errorf writes a fmt.Sprintf-formatted record to stderr at error level.
+// It reports a problem; it does not terminate the process.
 func Errorf(format string, args ...any) {
-	Logger.Errorf(format, args...)
-}
-
-// Fatal logs a fatal message and exits
-func Fatal(args ...any) {
-	Logger.Fatal(args...)
-}
-
-// Fatalf logs a formatted fatal message and exits
-func Fatalf(format string, args ...any) {
-	Logger.Fatalf(format, args...)
-}
-
-// WithField returns a log entry with a field
-func WithField(key string, value any) *logrus.Entry {
-	return Logger.WithField(key, value)
-}
-
-// WithFields returns a log entry with fields
-func WithFields(fields logrus.Fields) *logrus.Entry {
-	return Logger.WithFields(fields)
+	logger.Errorf(format, args...)
 }

@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"sync"
 	"testing"
 
+	"github.com/betterleaks/betterleaks/detect"
 	"github.com/prometheus/prometheus/model/labels"
 )
 
@@ -65,6 +67,33 @@ func TestParseFilter(t *testing.T) {
 			wantCount: 1,
 			wantErr:   false,
 		},
+		{
+			// Whitespace-only is "unrestricted", not an error and not a
+			// match-nothing filter.
+			name:      "whitespace-only filter",
+			filter:    "   \t\n ",
+			wantCount: 0,
+			wantErr:   false,
+		},
+		{
+			// A pipeline stage cannot survive the trip into
+			// Config.QueryFilter, which is a matcher slice, so ParseFilter
+			// fails closed rather than enforcing the weaker stream selector
+			// alone.
+			name:    "line filter pipeline is rejected",
+			filter:  `{namespace="prod"} |= "error"`,
+			wantErr: true,
+		},
+		{
+			name:    "parser stage is rejected",
+			filter:  `{namespace="prod"} | json`,
+			wantErr: true,
+		},
+		{
+			name:    "multi-stage pipeline is rejected",
+			filter:  `{namespace="prod"} |= "error" | json | level="error"`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -76,6 +105,65 @@ func TestParseFilter(t *testing.T) {
 			}
 			if !tt.wantErr && len(matchers) != tt.wantCount {
 				t.Errorf("ParseFilter() got %d matchers, want %d", len(matchers), tt.wantCount)
+			}
+		})
+	}
+}
+
+// TestParseFilter_EmptyIsUnrestricted pins that a blank filter is (nil, nil)
+// rather than an error or an empty-but-non-nil slice: callers read a nil
+// matcher slice as "no restriction".
+func TestParseFilter_EmptyIsUnrestricted(t *testing.T) {
+	t.Parallel()
+
+	for _, filter := range []string{"", "   \t\n "} {
+		matchers, err := ParseFilter(filter)
+		if err != nil {
+			t.Errorf("ParseFilter(%q) unexpected error: %v", filter, err)
+		}
+		if matchers != nil {
+			t.Errorf("ParseFilter(%q) = %v, want nil", filter, matchers)
+		}
+	}
+}
+
+// TestParseFilter_RejectsPipeline pins the fail-closed error: it names the
+// offending filter and the stages that could not be enforced, so an operator
+// who writes a pipeline gets a startup failure instead of a silently weaker
+// restriction.
+func TestParseFilter_RejectsPipeline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		filter  string
+		wantErr string
+	}{
+		{
+			name:    "line filter",
+			filter:  `{namespace="prod"} |= "error"`,
+			wantErr: `invalid LogQL stream selector "{namespace=\"prod\"} |= \"error\"": only bare stream selectors are supported, but "|= \"error\"" cannot be enforced and would be silently discarded`,
+		},
+		{
+			name:    "json parser",
+			filter:  `{namespace="prod"} | json`,
+			wantErr: `invalid LogQL stream selector "{namespace=\"prod\"} | json": only bare stream selectors are supported, but "| json" cannot be enforced and would be silently discarded`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			matchers, err := ParseFilter(tt.filter)
+			if err == nil {
+				t.Fatalf("ParseFilter(%q) = %v, want an error", tt.filter, matchers)
+			}
+			if matchers != nil {
+				t.Errorf("ParseFilter(%q) returned %v alongside the error, want nil", tt.filter, matchers)
+			}
+			if err.Error() != tt.wantErr {
+				t.Errorf("error = %q, want %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
@@ -235,56 +323,93 @@ func TestBuildFilterSelector(t *testing.T) {
 	}
 }
 
-func TestFilterConfig(t *testing.T) {
-	// Reset config before and after test
-	ResetFilterConfig()
-	defer ResetFilterConfig()
+// TestNewConfig covers the parsing of the raw query filter into matchers.
+func TestNewConfig(t *testing.T) {
+	t.Parallel()
 
-	// Test that GetFilterConfig returns nil initially
-	if cfg := GetFilterConfig(); cfg != nil {
-		t.Error("GetFilterConfig() should return nil before initialization")
+	tests := []struct {
+		name         string
+		rawFilter    string
+		wantMatchers int
+		wantErr      bool
+	}{
+		{name: "valid selector", rawFilter: `{namespace="prod"}`, wantMatchers: 1},
+		{name: "multiple matchers", rawFilter: `{namespace="prod", job="api"}`, wantMatchers: 2},
+		{name: "empty filter leaves queries unrestricted", rawFilter: ""},
+		{name: "invalid filter", rawFilter: "invalid filter", wantErr: true},
+		{name: "pipeline filter is rejected", rawFilter: `{namespace="prod"} |= "error"`, wantErr: true},
 	}
 
-	// Test initialization with valid filter
-	err := InitializeFilterConfig(`{namespace="prod"}`)
-	if err != nil {
-		t.Errorf("InitializeFilterConfig() unexpected error: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	cfg := GetFilterConfig()
-	if cfg == nil {
-		t.Fatal("GetFilterConfig() should not return nil after initialization")
-	}
+			cfg, err := NewConfig(tt.rawFilter, false)
 
-	if cfg.RawFilter != `{namespace="prod"}` {
-		t.Errorf("FilterConfig.RawFilter = %q, want %q", cfg.RawFilter, `{namespace="prod"}`)
-	}
-
-	if len(cfg.Matchers) != 1 {
-		t.Errorf("FilterConfig.Matchers length = %d, want 1", len(cfg.Matchers))
-	}
-}
-
-func TestFilterConfig_EmptyFilter(t *testing.T) {
-	ResetFilterConfig()
-	defer ResetFilterConfig()
-
-	err := InitializeFilterConfig("")
-	if err != nil {
-		t.Errorf("InitializeFilterConfig() with empty filter should not error: %v", err)
-	}
-
-	if cfg := GetFilterConfig(); cfg != nil {
-		t.Error("GetFilterConfig() should return nil after initializing with empty filter")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("NewConfig() should have returned an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewConfig() unexpected error: %v", err)
+			}
+			if len(cfg.QueryFilter) != tt.wantMatchers {
+				t.Errorf("QueryFilter length = %d, want %d", len(cfg.QueryFilter), tt.wantMatchers)
+			}
+			if cfg.Detector != nil {
+				t.Error("Detector should be nil when secret filtering is disabled")
+			}
+		})
 	}
 }
 
-func TestFilterConfig_InvalidFilter(t *testing.T) {
-	ResetFilterConfig()
-	defer ResetFilterConfig()
+// TestNewConfig_SecretFilter covers the detector half of the configuration.
+func TestNewConfig_SecretFilter(t *testing.T) {
+	cfg, err := NewConfig("", true)
+	if err != nil {
+		t.Fatalf("NewConfig() unexpected error: %v", err)
+	}
+	if cfg.Detector == nil {
+		t.Fatal("Detector should be set when secret filtering is enabled")
+	}
+	if !cfg.Detector.SkipFindingAppend {
+		t.Error("Detector should skip appending findings")
+	}
+}
 
-	err := InitializeFilterConfig("invalid filter")
-	if err == nil {
-		t.Error("InitializeFilterConfig() with invalid filter should return error")
+// TestNewConfig_SecretDetectorIsShared pins that every Config gets the same
+// detector and that concurrent NewConfig calls are race-free. Exactly one
+// detector per process is what keeps the betterleaks/tiktoken global-write
+// hazard out of reach — see config.go's sharedDetector for what that write is;
+// run under -race to mean anything.
+func TestNewConfig_SecretDetectorIsShared(t *testing.T) {
+	const goroutines = 8
+
+	detectors := make([]*detect.Detector, goroutines)
+	var wg sync.WaitGroup
+	for i := range detectors {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			cfg, err := NewConfig("", true)
+			if err != nil {
+				t.Errorf("NewConfig() unexpected error: %v", err)
+				return
+			}
+			detectors[i] = cfg.Detector
+		}()
+	}
+	wg.Wait()
+
+	for i, d := range detectors {
+		if d == nil {
+			t.Fatalf("goroutine %d got a nil Detector", i)
+		}
+		if d != detectors[0] {
+			t.Errorf("goroutine %d got detector %p, want the shared %p", i, d, detectors[0])
+		}
 	}
 }

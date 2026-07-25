@@ -10,11 +10,32 @@ import (
 
 const testGenericAPIKey = "aZ9xY8wV7uT6sR5qP4nM3kL2jH1gF0dS" //gitleaks:allow — fake fixture for filter tests
 
-func TestFilterSecretEntries_OmitsMatchingLines(t *testing.T) {
-	if err := InitializeSecretFilterConfig(true); err != nil {
-		t.Fatalf("InitializeSecretFilterConfig failed: %v", err)
+// newTestConfig builds a handler Config, failing the test if it cannot.
+//
+// Tests that build a detector (secretFilter=true) must NOT call t.Parallel():
+// betterleaks lazily initialises the process-global tiktoken BPE loader on the
+// first scan, so two detectors scanning concurrently race inside the dependency.
+// Production only ever builds one detector, so this is a test-only constraint.
+func newTestConfig(t *testing.T, rawFilter string, secretFilter bool) Config {
+	t.Helper()
+
+	cfg, err := NewConfig(rawFilter, secretFilter)
+	if err != nil {
+		t.Fatalf("NewConfig(%q, %v) failed: %v", rawFilter, secretFilter, err)
 	}
-	defer ResetSecretFilterConfig()
+	return cfg
+}
+
+// newTestHandlers returns a handler set with no query filter and no secret
+// filtering, matching the defaults most tests want.
+func newTestHandlers(t *testing.T) *Handlers {
+	t.Helper()
+
+	return New(newTestConfig(t, "", false))
+}
+
+func TestFilterSecretEntries_OmitsMatchingLines(t *testing.T) {
+	cfg := newTestConfig(t, "", true)
 
 	entries := []logEntry{
 		{
@@ -29,7 +50,7 @@ func TestFilterSecretEntries_OmitsMatchingLines(t *testing.T) {
 		},
 	}
 
-	filtered, summary := filterSecretEntries(context.Background(), entries)
+	filtered, summary := filterSecretEntries(context.Background(), cfg.Detector, entries)
 
 	if summary.LinesOmitted != 1 {
 		t.Fatalf("expected 1 omitted line, got %d", summary.LinesOmitted)
@@ -46,14 +67,13 @@ func TestFilterSecretEntries_OmitsMatchingLines(t *testing.T) {
 }
 
 func TestFilterSecretEntries_DisabledKeepsLines(t *testing.T) {
-	if err := InitializeSecretFilterConfig(false); err != nil {
-		t.Fatalf("InitializeSecretFilterConfig failed: %v", err)
-	}
-	defer ResetSecretFilterConfig()
+	t.Parallel()
+
+	cfg := newTestConfig(t, "", false)
 
 	entries := []logEntry{{Line: `api_key = "` + testGenericAPIKey + `"`}}
 
-	filtered, summary := filterSecretEntries(context.Background(), entries)
+	filtered, summary := filterSecretEntries(context.Background(), cfg.Detector, entries)
 
 	if summary.LinesOmitted != 0 || summary.Findings != 0 {
 		t.Fatalf("expected empty summary, got %+v", summary)
@@ -63,7 +83,29 @@ func TestFilterSecretEntries_DisabledKeepsLines(t *testing.T) {
 	}
 }
 
+// TestFilterSecretEntries_CancelledContext pins that a cancelled scan returns
+// the entries filtered so far rather than the whole input.
+func TestFilterSecretEntries_CancelledContext(t *testing.T) {
+	cfg := newTestConfig(t, "", true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	entries := []logEntry{{Line: "normal application log"}}
+
+	filtered, summary := filterSecretEntries(ctx, cfg.Detector, entries)
+
+	if len(filtered) != 0 {
+		t.Fatalf("expected no entries from a cancelled scan, got %d", len(filtered))
+	}
+	if summary != (SecretFilterSummary{}) {
+		t.Fatalf("expected empty summary, got %+v", summary)
+	}
+}
+
 func TestFormatSecretOmissionNote(t *testing.T) {
+	t.Parallel()
+
 	if got := formatSecretOmissionNote(1); got != "1 line omitted due to detected secrets" {
 		t.Fatalf("unexpected singular note: %q", got)
 	}

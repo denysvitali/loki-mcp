@@ -1,0 +1,378 @@
+package handlers
+
+import (
+	"testing"
+	"time"
+
+	"github.com/grafana/loki/v3/pkg/loghttp"
+)
+
+// TestParseTime pins the accepted time formats, including the quirk that a
+// leading "-" which fails time.ParseDuration falls through to the absolute
+// format parsers rather than surfacing the duration error.
+func TestParseTime(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		want     time.Time
+		relative time.Duration // used when want is zero and wantErr is false
+		useRel   bool
+		wantErr  string
+	}{
+		{name: "now keyword", input: "now", useRel: true, relative: 0},
+		{name: "relative hours", input: "-1h", useRel: true, relative: -time.Hour},
+		{name: "relative minutes", input: "-30m", useRel: true, relative: -30 * time.Minute},
+		{name: "positive duration is not relative", input: "1h", wantErr: "unsupported time format: 1h"},
+		{
+			name:  "rfc3339",
+			input: "2024-01-15T10:30:45Z",
+			want:  time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+		{
+			name:  "rfc3339 with offset",
+			input: "2024-01-15T10:30:45+02:00",
+			want:  time.Date(2024, 1, 15, 10, 30, 45, 0, time.FixedZone("", 2*60*60)),
+		},
+		{
+			name:  "datetime without zone",
+			input: "2024-01-15T10:30:45",
+			want:  time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+		{
+			name:  "space separated datetime",
+			input: "2024-01-15 10:30:45",
+			want:  time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+		{
+			name:  "date only",
+			input: "2024-01-15",
+			want:  time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC),
+		},
+		{name: "garbage", input: "not a time", wantErr: "unsupported time format: not a time"},
+		{name: "empty", input: "", wantErr: "unsupported time format: "},
+		// Quirk: the leading "-" branch swallows the ParseDuration error and
+		// keeps going, so the reported error is the generic one.
+		{name: "bad duration falls through", input: "-1x", wantErr: "unsupported time format: -1x"},
+		{name: "negative garbage falls through", input: "-nope", wantErr: "unsupported time format: -nope"},
+		{name: "negative date falls through", input: "-2024-01-15", wantErr: "unsupported time format: -2024-01-15"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			before := time.Now()
+			got, err := parseTime(tt.input)
+			after := time.Now()
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("parseTime(%q) = %v, want error %q", tt.input, got, tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Fatalf("parseTime(%q) error = %q, want %q", tt.input, err.Error(), tt.wantErr)
+				}
+				if !got.IsZero() {
+					t.Errorf("parseTime(%q) returned %v on error, want zero time", tt.input, got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("parseTime(%q) unexpected error: %v", tt.input, err)
+			}
+
+			if tt.useRel {
+				lo := before.Add(tt.relative)
+				hi := after.Add(tt.relative)
+				if got.Before(lo) || got.After(hi) {
+					t.Errorf("parseTime(%q) = %v, want within [%v, %v]", tt.input, got, lo, hi)
+				}
+				return
+			}
+
+			if !got.Equal(tt.want) {
+				t.Errorf("parseTime(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFilterEntries covers case-insensitive and case-sensitive substring
+// filtering in one table.
+func TestFilterEntries(t *testing.T) {
+	t.Parallel()
+
+	entries := []logEntry{
+		{Timestamp: time.Now(), Line: "ERROR: something failed", Labels: loghttp.LabelSet{"job": "test"}},
+		{Timestamp: time.Now(), Line: "info: everything is fine", Labels: loghttp.LabelSet{"job": "test"}},
+		{Timestamp: time.Now(), Line: "Warning: potential issue", Labels: loghttp.LabelSet{"job": "test"}},
+		{Timestamp: time.Now(), Line: "error in lowercase", Labels: loghttp.LabelSet{"job": "test"}},
+	}
+
+	tests := []struct {
+		name          string
+		filter        string
+		caseSensitive bool
+		want          []string
+	}{
+		{
+			name:   "case-insensitive matches both cases",
+			filter: "error",
+			want:   []string{"ERROR: something failed", "error in lowercase"},
+		},
+		{
+			name:          "case-sensitive matches only the exact case",
+			filter:        "ERROR",
+			caseSensitive: true,
+			want:          []string{"ERROR: something failed"},
+		},
+		{
+			name:   "no match yields nothing",
+			filter: "no-such-substring",
+		},
+		{
+			name:   "empty filter matches everything",
+			filter: "",
+			want: []string{
+				"ERROR: something failed",
+				"info: everything is fine",
+				"Warning: potential issue",
+				"error in lowercase",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			filtered := filterEntries(entries, tt.filter, tt.caseSensitive)
+
+			if len(filtered) != len(tt.want) {
+				t.Fatalf("got %d entries, want %d", len(filtered), len(tt.want))
+			}
+			for i, entry := range filtered {
+				if entry.Line != tt.want[i] {
+					t.Errorf("entry %d = %q, want %q", i, entry.Line, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestApplyHeadTail covers head, tail, and the out-of-range cases in one table.
+//
+// The input is in the newest-first order collectAndSortEntries produces, and
+// every expectation names log lines rather than slice positions: head must
+// still mean "the oldest N" and tail "the newest N", whichever end of the
+// slice those now live at.
+func TestApplyHeadTail(t *testing.T) {
+	t.Parallel()
+
+	// Newest first: "fifth" is the most recent line, "first" the oldest.
+	five := []logEntry{
+		{Timestamp: time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC), Line: "fifth"},
+		{Timestamp: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), Line: "fourth"},
+		{Timestamp: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Line: "third"},
+		{Timestamp: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Line: "second"},
+		{Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Line: "first"},
+	}
+
+	tests := []struct {
+		name    string
+		entries []logEntry
+		head    int
+		tail    int
+		want    []string
+	}{
+		{name: "head takes the oldest", entries: five, head: 3, want: []string{"third", "second", "first"}},
+		{name: "tail takes the newest", entries: five, tail: 2, want: []string{"fifth", "fourth"}},
+		{
+			name: "head larger than count returns everything", entries: five, head: 10,
+			want: []string{"fifth", "fourth", "third", "second", "first"},
+		},
+		{
+			name: "tail larger than count returns everything", entries: five, tail: 10,
+			want: []string{"fifth", "fourth", "third", "second", "first"},
+		},
+		{
+			name: "neither head nor tail returns everything", entries: five,
+			want: []string{"fifth", "fourth", "third", "second", "first"},
+		},
+		{name: "empty input", entries: nil, head: 3},
+		{name: "head wins when both are set", entries: five, head: 1, tail: 1, want: []string{"first"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := applyHeadTail(tt.entries, tt.head, tt.tail)
+
+			if len(result) != len(tt.want) {
+				t.Fatalf("got %d entries, want %d", len(result), len(tt.want))
+			}
+			for i, entry := range result {
+				if entry.Line != tt.want[i] {
+					t.Errorf("entry %d = %q, want %q", i, entry.Line, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestCollectAndSortEntries_MultipleStreams tests merging and sorting across streams
+func TestCollectAndSortEntries_MultipleStreams(t *testing.T) {
+	streams := loghttp.Streams{
+		{
+			Labels: loghttp.LabelSet{"job": "job1"},
+			Entries: []loghttp.Entry{
+				{Timestamp: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Line: "job1-third"},
+				{Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Line: "job1-first"},
+			},
+		},
+		{
+			Labels: loghttp.LabelSet{"job": "job2"},
+			Entries: []loghttp.Entry{
+				{Timestamp: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), Line: "job2-fourth"},
+				{Timestamp: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Line: "job2-second"},
+			},
+		},
+	}
+
+	entries := collectAndSortEntries(streams)
+
+	if len(entries) != 4 {
+		t.Fatalf("Expected 4 entries, got %d", len(entries))
+	}
+
+	// Verify entries are sorted by timestamp (newest first), matching the
+	// logproto.BACKWARD direction the range query asks Loki for.
+	expected := []string{"job2-fourth", "job1-third", "job2-second", "job1-first"}
+	for i, entry := range entries {
+		if entry.Line != expected[i] {
+			t.Errorf("Entry %d: expected '%s', got '%s'", i, expected[i], entry.Line)
+		}
+	}
+}
+
+// TestCollectAndSortEntries_EqualTimestamps pins the tie-break that makes the
+// sort a function of the input alone. sort.Slice is not stable, so without it
+// entries sharing a timestamp could come back in a different order run to run.
+func TestCollectAndSortEntries_EqualTimestamps(t *testing.T) {
+	sameTS := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	streams := loghttp.Streams{
+		{
+			Labels: loghttp.LabelSet{"job": "zeta"},
+			Entries: []loghttp.Entry{
+				{Timestamp: sameTS, Line: "shared line"},
+				{Timestamp: sameTS, Line: "b line"},
+			},
+		},
+		{
+			Labels: loghttp.LabelSet{"job": "alpha"},
+			Entries: []loghttp.Entry{
+				{Timestamp: newer, Line: "newest"},
+				{Timestamp: sameTS, Line: "shared line"},
+				{Timestamp: sameTS, Line: "a line"},
+			},
+		},
+	}
+
+	// Newest first; then equal timestamps by line; then by label set.
+	want := []struct{ line, job string }{
+		{"newest", "alpha"},
+		{"a line", "alpha"},
+		{"b line", "zeta"},
+		{"shared line", "alpha"},
+		{"shared line", "zeta"},
+	}
+
+	for i := 0; i < 50; i++ {
+		entries := collectAndSortEntries(streams)
+		if len(entries) != len(want) {
+			t.Fatalf("got %d entries, want %d", len(entries), len(want))
+		}
+		for j, w := range want {
+			if entries[j].Line != w.line || entries[j].Labels["job"] != w.job {
+				t.Fatalf("iteration %d entry %d = (%q, job=%q), want (%q, job=%q)",
+					i, j, entries[j].Line, entries[j].Labels["job"], w.line, w.job)
+			}
+		}
+	}
+}
+
+// TestEntriesToStreams tests converting entries back to streams format
+func TestEntriesToStreams(t *testing.T) {
+	entries := []logEntry{
+		{Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Line: "first", Labels: loghttp.LabelSet{"job": "test"}},
+		{Timestamp: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Line: "second", Labels: loghttp.LabelSet{"job": "test"}},
+		{Timestamp: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Line: "third", Labels: loghttp.LabelSet{"job": "other"}},
+	}
+
+	streams := entriesToStreams(entries)
+
+	// Should have 2 streams (grouped by labels), ordered by label-set string.
+	if len(streams) != 2 {
+		t.Fatalf("Expected 2 streams, got %d", len(streams))
+	}
+	wantLabels := []string{`{job="other"}`, `{job="test"}`}
+	for i, want := range wantLabels {
+		if got := streams[i].Labels.String(); got != want {
+			t.Errorf("stream %d labels = %s, want %s", i, got, want)
+		}
+	}
+
+	// Count total entries across streams
+	totalEntries := 0
+	for _, stream := range streams {
+		totalEntries += len(stream.Entries)
+	}
+	if totalEntries != 3 {
+		t.Errorf("Expected 3 total entries across streams, got %d", totalEntries)
+	}
+}
+
+// TestEntriesToStreams_StableOrder pins that the stream order does not depend
+// on Go's randomised map iteration. The grouping runs through a map, so a
+// single pass would agree with an unsorted implementation by chance; only
+// repetition catches it.
+func TestEntriesToStreams_StableOrder(t *testing.T) {
+	jobs := []string{"eee", "aaa", "ccc", "bbb", "ddd"}
+	entries := make([]logEntry, 0, len(jobs))
+	for i, job := range jobs {
+		entries = append(entries, logEntry{
+			Timestamp: time.Date(2024, 1, 1, 0, 0, i, 0, time.UTC),
+			Line:      "line from " + job,
+			Labels:    loghttp.LabelSet{"job": job},
+		})
+	}
+
+	want := []string{`{job="aaa"}`, `{job="bbb"}`, `{job="ccc"}`, `{job="ddd"}`, `{job="eee"}`}
+
+	for i := 0; i < 50; i++ {
+		streams := entriesToStreams(entries)
+		if len(streams) != len(want) {
+			t.Fatalf("iteration %d: got %d streams, want %d", i, len(streams), len(want))
+		}
+		for j, w := range want {
+			if got := streams[j].Labels.String(); got != w {
+				t.Fatalf("iteration %d: stream %d labels = %s, want %s", i, j, got, w)
+			}
+		}
+	}
+}
+
+// TestEntriesToStreams_Empty tests converting empty entries
+func TestEntriesToStreams_Empty(t *testing.T) {
+	streams := entriesToStreams([]logEntry{})
+
+	if len(streams) != 0 {
+		t.Errorf("Expected 0 streams for empty entries, got %d", len(streams))
+	}
+}
