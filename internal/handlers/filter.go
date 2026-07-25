@@ -20,11 +20,12 @@ import (
 // rejected, because Config.QueryFilter is a matcher slice and every stage
 // after the selector would be dropped on the way there: enforcing
 // `{namespace="prod"} |= "error"` as `{namespace="prod"}` is a silent
-// weakening of a containment control, so ParseFilter fails closed instead
-// (FINDINGS.md §15). A metric query such as `rate({job="api"}[5m])` is
-// rejected with "only log selector is supported", as is any syntactically
-// invalid selector; every rejection comes back wrapped in an error quoting the
-// input.
+// weakening of a containment control, so ParseFilter fails closed instead: the
+// operator gets a startup error naming the stage rather than a filter that is
+// quietly weaker than what they wrote. A metric query such as
+// `rate({job="api"}[5m])` is rejected with "only log selector is supported",
+// as is any syntactically invalid selector; every rejection comes back wrapped
+// in an error quoting the input.
 func ParseFilter(filter string) ([]*labels.Matcher, error) {
 	filter = strings.TrimSpace(filter)
 	if filter == "" {

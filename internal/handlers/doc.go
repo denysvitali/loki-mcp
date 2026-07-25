@@ -42,10 +42,10 @@
 // The one piece of shared mutable state reachable from a handler is
 // Config.Detector, a single *detect.Detector shared by all concurrent scans.
 // NewConfig sets SkipFindingAppend so scans do not accumulate findings into
-// the detector. FINDINGS.md §11 records the one known concurrency hazard in
-// that dependency — two *distinct* detectors racing on a process-global inside
-// tiktoken-go — which a single process-wide detector avoids, and which is why
-// tests that construct a detector must not call t.Parallel().
+// the detector. There is one known concurrency hazard in that dependency — two
+// *distinct* detectors racing on a process-global inside tiktoken-go, see
+// config.go's sharedDetector — which a single process-wide detector avoids, and
+// which is why tests that construct a detector must not call t.Parallel().
 //
 // filterSecretEntries polls ctx.Done() during its CPU-bound scan; a cancelled
 // scan returns the entries filtered so far rather than an error.

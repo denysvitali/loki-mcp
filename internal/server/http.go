@@ -147,7 +147,7 @@ func serve(ctx context.Context, srv *http.Server, cfg HTTPConfig) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
 	defer shutdownCancel()
 
-	//nolint:contextcheck // not inheriting ctx is the whole point: ctx is done, so a derived shutdown context would expire before Shutdown ever polled it (FINDINGS.md §7).
+	//nolint:contextcheck // not inheriting ctx is the whole point: ctx is done, so a derived shutdown context would expire before Shutdown ever polled it, making the grace period dead code.
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logging.Errorf("HTTP server shutdown error: %v", err)
 		return err

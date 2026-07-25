@@ -240,8 +240,10 @@ func TestRunHTTP(t *testing.T) {
 // straight away. It then goes idle well inside defaultShutdownTimeout, so the
 // drain completes and the return value is nil.
 //
-// Before FINDINGS.md §7 was fixed this returned context.Canceled, because the
-// shutdown context was derived from the signal context that had just fired.
+// A shutdown context derived from the signal context would fail this: that
+// context is already cancelled when the select wakes, so Shutdown would return
+// context.Canceled immediately and the grace period would never apply. Rooting
+// it at context.Background is what this test is guarding.
 func TestRunHTTPDrainsInFlightConnection(t *testing.T) {
 	addr, errCh := startRunHTTP(t, false)
 

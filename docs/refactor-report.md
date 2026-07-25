@@ -218,8 +218,8 @@ why it is not duplication.
 
 One concept per file in `internal/handlers`, a `doc.go` per package saying what
 belongs there and what does not, three ADRs recording the decisions that would
-otherwise look arbitrary, and a `FINDINGS.md` that keeps bug reports out of the
-refactor commits.
+otherwise look arbitrary, and bug reports written up separately so they stay out
+of the refactor commits.
 
 ## 3. Deferred, with reasons
 
@@ -258,7 +258,8 @@ refactor commits.
    data; splitting them hides the assertions) and from `forbidigo` (test helpers
    collect goroutine output behind a mutex). Production thresholds are the audit
    targets, unmodified.
-7. **The bugs in `FINDINGS.md` are reported, not fixed** — by design, see §5.
+7. **The bugs found during the refactor were reported, not fixed** — by design,
+   see §5. (They were fixed afterwards, on this same branch.)
 
 ## 4. `BREAKING:`
 
@@ -284,13 +285,11 @@ variables are unchanged. Verified, not assumed:
   `loki_query` with `format: raw` and the secret filter on its default `true`
   sometimes emits streams in a different order. Running the same call 24 times
   against each binary: baseline produced order A 21 times and order B 3 times;
-  the final binary produced A 20 and B 4. This is `FINDINGS.md` #5 — the secret
+  the final binary produced A 20 and B 4. This is finding 5 — the secret
   filter regroups entries through a map — and it is equally nondeterministic on
   the baseline. Not introduced here, and not fixed here.
 
 ## 5. Bugs found and reported, not fixed
-
-Full write-ups with reproductions in [`FINDINGS.md`](../FINDINGS.md).
 
 | # | Severity | Summary |
 |---|---|---|
@@ -337,7 +336,7 @@ restated in the closing task, plus the per-commit green gates from
 | 13 | Every goroutine has an owner and a guaranteed exit | done | One `go` statement in production, joined by a deferred receive in `serve`, with the exit argument written out. |
 | 14 | Dependency direction documented and enforced | done | `docs/architecture.md`; `depguard` rules verified against `go list` output and sanity-checked by temporarily denying an import the code does have. |
 | 15 | Docs true against the code | done | Every audit doc-drift item fixed; runnable `Example` tests execute the doc claims in CI. |
-| 16 | Bugs reported, not silently fixed | done | 15 entries in `FINDINGS.md`, each with a reproduction; none fixed in code. |
+| 16 | Bugs reported, not silently fixed | done | 15 findings, each written up with a reproduction; none fixed inside a refactor commit. |
 | 17 | No breaking change | done | §4: tool schemas, `--help` and 19 differential tool calls byte-identical against the `7441901` binary. |
 | 18 | Coverage improved | done | 29.9% → 87.3%; every package except `main` went from 0% to ≥79%. |
 | 19 | Each commit independently green | done | 27 non-merge commits, each built and tested at the time it was made. |

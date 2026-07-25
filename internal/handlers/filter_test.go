@@ -77,8 +77,9 @@ func TestParseFilter(t *testing.T) {
 		},
 		{
 			// A pipeline stage cannot survive the trip into
-			// Config.QueryFilter, so ParseFilter fails closed rather than
-			// enforcing the weaker stream selector alone (FINDINGS.md §15).
+			// Config.QueryFilter, which is a matcher slice, so ParseFilter
+			// fails closed rather than enforcing the weaker stream selector
+			// alone.
 			name:    "line filter pipeline is rejected",
 			filter:  `{namespace="prod"} |= "error"`,
 			wantErr: true,
@@ -129,7 +130,7 @@ func TestParseFilter_EmptyIsUnrestricted(t *testing.T) {
 // TestParseFilter_RejectsPipeline pins the fail-closed error: it names the
 // offending filter and the stages that could not be enforced, so an operator
 // who writes a pipeline gets a startup failure instead of a silently weaker
-// restriction (FINDINGS.md §15).
+// restriction.
 func TestParseFilter_RejectsPipeline(t *testing.T) {
 	t.Parallel()
 
@@ -381,7 +382,8 @@ func TestNewConfig_SecretFilter(t *testing.T) {
 // TestNewConfig_SecretDetectorIsShared pins that every Config gets the same
 // detector and that concurrent NewConfig calls are race-free. Exactly one
 // detector per process is what keeps the betterleaks/tiktoken global-write
-// hazard out of reach (FINDINGS.md §11); run under -race to mean anything.
+// hazard out of reach — see config.go's sharedDetector for what that write is;
+// run under -race to mean anything.
 func TestNewConfig_SecretDetectorIsShared(t *testing.T) {
 	const goroutines = 8
 

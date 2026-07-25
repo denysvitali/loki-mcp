@@ -242,9 +242,9 @@ func TestFormatLokiResults_EmptyStreams(t *testing.T) {
 }
 
 // TestFormatLokiResults_WarningsBlock pins the trailing warnings block that
-// raw and text render. Before FINDINGS.md §12 both formats dropped
-// result.Warnings on the floor, so an upstream Loki warning never reached a
-// non-JSON client.
+// raw and text render. Both formats must carry result.Warnings through:
+// dropping them on the floor, as a renderer that only prints entries does,
+// means an upstream Loki warning never reaches a non-JSON client.
 func TestFormatLokiResults_WarningsBlock(t *testing.T) {
 	t.Parallel()
 
@@ -515,7 +515,9 @@ func TestFormatLokiResults_JSONWireShape(t *testing.T) {
 // TestFormatLokiResults_JSONRoundTrip proves the json output parses back
 // through the Loki client's own decoder with every stream, label, timestamp and
 // line intact. Re-marshalling the loghttp structs directly does not: they
-// define UnmarshalJSON but no MarshalJSON (FINDINGS.md §6).
+// define UnmarshalJSON but no MarshalJSON and carry no struct tags, so they
+// re-encode as Go-shaped JSON that no Loki-aware parser accepts. That is why
+// format.go marshals the lokiStreamsResponse DTO instead.
 func TestFormatLokiResults_JSONRoundTrip(t *testing.T) {
 	t.Parallel()
 

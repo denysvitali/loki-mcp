@@ -192,10 +192,10 @@ func TestPersistentPreRunESuccess(t *testing.T) {
 	assert.NotNil(t, handlerConfig.Detector, "the hook publishes the built config")
 }
 
-// TestVersionWorksWithoutLoki pins that `version` no longer needs a reachable
-// Loki. The root hook used to end in pingLoki, and cobra runs it for every
-// runnable command, so version exited 1 with an empty stdout whenever Loki was
-// down (FINDINGS.md §3).
+// TestVersionWorksWithoutLoki pins that `version` does not need a reachable
+// Loki. The root hook must not call pingLoki: cobra runs it for every runnable
+// command, so a ping there makes version — and help, and completion — exit 1
+// with an empty stdout whenever Loki is down.
 func TestVersionWorksWithoutLoki(t *testing.T) {
 	isolateViper(t)
 	t.Setenv("OTEL_SDK_DISABLED", "true")
@@ -319,8 +319,9 @@ func TestFlagErrorStillPrintsUsage(t *testing.T) {
 
 // TestRootRunEIsStdio pins that a bare `loki-mcp` is literally the stdio
 // command: rootCmd is runnable, and its RunE is the same function stdioCmd
-// uses. Before FINDINGS.md §1 was fixed rootCmd had no Run at all, so the bare
-// invocation printed help and exited 0 without starting any server.
+// uses. A rootCmd with no Run at all would make the bare invocation print help
+// and exit 0 without starting any server, which is what "args": [] client
+// configs and the container entrypoint rely on not happening.
 func TestRootRunEIsStdio(t *testing.T) {
 	require.NotNil(t, rootCmd.RunE, "a bare invocation must be runnable")
 	assert.Nil(t, rootCmd.Run, "RunE, not Run: startup failures must be errors")

@@ -65,10 +65,10 @@ func TestHTTPFlags(t *testing.T) {
 // precedence: --port when passed, then PORT, then the default. LOKI_PORT is
 // not a source at all.
 //
-// It used to be one, and the highest-ranked one: the port key was registered
-// with viper, whose AutomaticEnv resolves the prefixed LOKI_PORT before any
-// explicit BindEnv, so the undocumented name beat the "[env: PORT]" the flag
-// advertises (FINDINGS.md §8).
+// It would become one, and the highest-ranked one, the moment the port key is
+// registered with viper: viper's AutomaticEnv resolves the prefixed LOKI_PORT
+// before any explicit BindEnv, so the undocumented name would beat the
+// "[env: PORT]" the flag advertises. This test is what catches that.
 func TestPortResolution(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
 		isolateViper(t)

@@ -18,9 +18,9 @@ All log output is sent to stderr to avoid interfering with the MCP protocol.`,
 }
 
 // runStdio is the body of `loki-mcp stdio`. rootCmd uses it as its own RunE,
-// so a bare `loki-mcp` is the same command rather than a help dump
-// (FINDINGS.md §1): every MCP client config that passes "args": [] gets a
-// working stdio server.
+// so a bare `loki-mcp` is the same command rather than a help dump: every MCP
+// client config that passes "args": [] gets a working stdio server, and so
+// does a container started from the image's entrypoint with no argument.
 func runStdio(_ *cobra.Command, _ []string) error {
 	if err := pingLoki(); err != nil {
 		return err

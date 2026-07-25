@@ -1,5 +1,12 @@
 # Refactor audit — loki-mcp
 
+> **Historical record.** This document describes the tree as it stood at commit
+> `7441901` and the plan drawn up from it. It is not kept current. The bugs it
+> lists were fixed later on the `refactor/complexity-reduction` branch, and the
+> "BREAKING: none" at the end holds for the refactor itself but not for those
+> fixes — see [`refactor-report.md`](refactor-report.md) for what shipped and
+> what changed observably.
+
 Baseline commit: `7441901` (main). All numbers measured on a clean checkout of that
 commit with Go 1.26.4.
 
@@ -94,7 +101,7 @@ Severity: H = fix now, M = fix in this pass, L = note only.
 | `CLAUDE.md` | Documents env vars and flags but never the `stdio`/`http`/`version` subcommands | Same gap as the README |
 | `README.md`, `CLAUDE.md` | No mention that `--log-level`, `--log-format`, `--host`, `--port`, `--disable-sse` exist | Undocumented flags |
 
-### Bugs found (reported, **not** fixed in this refactor — see `FINDINGS.md`)
+### Bugs found (reported, **not** fixed in this refactor)
 
 1. Bare `loki-mcp` (no subcommand) prints help and exits 0. `Dockerfile`'s `ENTRYPOINT ["./loki-mcp"]` plus `docker-compose.yml`'s `loki-mcp-server` service therefore start a container that exits immediately, even though the compose file publishes port 8080.
 2. `loki-mcp version` fails when Loki is unreachable: `PersistentPreRunE` pings Loki before every runnable subcommand, including `version`.
@@ -124,7 +131,7 @@ Severity: H = fix now, M = fix in this pass, L = note only.
 + docs/architecture.md
 + docs/adr/0001-injected-handler-config.md
 + docs/adr/0002-telemetry-shutdown-registry-keeps-a-mutex.md
-+ FINDINGS.md
++ a bug-report document, so bug reports stay out of the refactor commits
 ```
 
 Renaming `internal/handlers` → `internal/loki` (a domain name rather than a layer
@@ -149,7 +156,7 @@ Each step is one commit and is independently green (`go build`, `go vet`,
 6. `refactor:` concurrency, one type per commit: injected handler config (removes
    `filterMu` + `secretFilterMu`), `atomic.Pointer` instruments, owned goroutines
    in `RunHTTP`.
-7. `docs:` truthful README/CLAUDE.md, `doc.go`, ADRs, `FINDINGS.md`, runnable
+7. `docs:` truthful README/CLAUDE.md, `doc.go`, ADRs, the bug reports, runnable
    `Example` tests.
 8. `ci:` tighten `.golangci.yml`.
 

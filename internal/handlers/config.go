@@ -92,8 +92,9 @@ var (
 // tiktoken.SetBpeLoader, an unsynchronised assignment to a package variable in
 // github.com/pkoukk/tiktoken-go. Two detectors each run their own Once and
 // both write that global, so two detectors scanning concurrently race inside
-// the dependency (FINDINGS.md §11 — the real fix belongs upstream). With a
-// single detector its own Once serialises the write and the hazard is gone;
+// the dependency. The real fix belongs upstream, in tiktoken-go; until it
+// lands, keeping to one detector is what avoids the race from this side. With
+// a single detector its own Once serialises the write and the hazard is gone;
 // building it under this Once additionally makes concurrent NewConfig calls
 // safe.
 //

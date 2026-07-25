@@ -50,12 +50,12 @@ const defaultPort = "8080"
 //  2. the PORT environment variable, when set to a non-empty value;
 //  3. defaultPort.
 //
-// LOKI_PORT is deliberately not consulted. It used to win over PORT, because
-// the port key is registered with viper and viper's AutomaticEnv resolves the
-// prefixed LOKI_PORT before any explicit BindEnv alias — so the undocumented
-// name silently shadowed the documented one (FINDINGS.md §8). Reading the two
-// sources by hand here is what keeps the order above true and visible; viper
-// has no per-key way to express it.
+// LOKI_PORT is deliberately not consulted, and is not a supported name. Were
+// the port key registered with viper, it would be: viper's AutomaticEnv
+// resolves the prefixed LOKI_PORT before any explicit BindEnv alias, so the
+// undocumented name would outrank the documented PORT the flag advertises.
+// Reading the two sources by hand here is what keeps the order above true and
+// visible; viper has no per-key way to express it.
 func resolvePort(flags *pflag.FlagSet) string {
 	if f := flags.Lookup("port"); f != nil && f.Changed {
 		return f.Value.String()

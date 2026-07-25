@@ -29,8 +29,8 @@ func TestVersionCommand(t *testing.T) {
 
 // TestVersionWritesToCobraWriter pins that the command prints through
 // cmd.OutOrStdout, so a writer installed with SetOut captures it and nothing
-// reaches the process stdout. It used to print with fmt.Println, which ignored
-// cobra's writer (FINDINGS.md §13).
+// reaches the process stdout. Printing with fmt.Println instead would ignore
+// cobra's writer, which makes the output untestable and uncapturable.
 func TestVersionWritesToCobraWriter(t *testing.T) {
 	var cobraOut bytes.Buffer
 	versionCmd.SetOut(&cobraOut)

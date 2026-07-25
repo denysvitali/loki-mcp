@@ -62,9 +62,9 @@ var _ = func() bool {
 }()
 
 // rootCmd carries the persistent flags and the startup hook shared by every
-// subcommand. Its RunE is stdio's, so a bare `loki-mcp` serves stdio instead
-// of printing help and exiting 0 (FINDINGS.md §1); being runnable also means
-// cobra now runs its PersistentPreRunE for the bare invocation.
+// subcommand. Its RunE is stdio's, so a bare `loki-mcp` serves stdio rather
+// than printing help and exiting 0; being runnable also means cobra runs its
+// PersistentPreRunE for the bare invocation.
 var rootCmd = &cobra.Command{
 	Use:   "loki-mcp",
 	Short: "MCP server for Grafana Loki",
@@ -78,8 +78,8 @@ mode explicitly:
 	RunE: runStdio,
 	// A runtime failure — an unreachable Loki, a port already taken — is not
 	// misuse of the command line, so it must not dump the usage block after
-	// the error (FINDINGS.md §3). Genuine flag-parsing errors still get it;
-	// see the SetFlagErrorFunc hook in init().
+	// the error. Genuine flag-parsing errors still get it; see the
+	// SetFlagErrorFunc hook in init().
 	SilenceUsage: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		if err := initLogging(); err != nil {
@@ -98,8 +98,8 @@ mode explicitly:
 
 		// pingLoki is deliberately not called here: cobra runs this hook for
 		// every runnable command, and version, help and completion have no
-		// business needing a reachable Loki (FINDINGS.md §3). The serving
-		// commands ping from their own RunE instead.
+		// business needing a reachable Loki — they must work offline and exit
+		// 0. The serving commands ping from their own RunE instead.
 		return nil
 	},
 }
