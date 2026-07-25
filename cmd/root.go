@@ -74,7 +74,7 @@ to AI assistants like Claude Desktop, Cursor, and n8n.
 Use subcommands to run the server in different modes:
   - stdio: For Claude Desktop and similar MCP clients
   - http:  For web-based clients and n8n`,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		if err := initLogging(); err != nil {
 			return err
 		}

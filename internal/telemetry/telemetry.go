@@ -1,3 +1,13 @@
+// Package telemetry owns the process-wide OpenTelemetry stack: the trace,
+// metric and log providers built from the standard OTEL_* environment (plus
+// optional stderr console exporters), the four MCP metric instruments, the
+// tool-handler middleware that spans and times every tool call, and the
+// logrus→OTel log bridge.
+//
+// Initialize is called once at startup by cmd and Shutdown once on the way
+// out; everything else here is safe to call before Initialize (it degrades to
+// no-ops) and safe for concurrent use. The package imports only
+// internal/logging: it must not reach up into handlers, server or cmd.
 package telemetry
 
 import (
@@ -58,6 +68,7 @@ var (
 	// no I/O under the lock (Shutdown copies the slice out and invokes the
 	// functions after unlocking), and the process has exactly one telemetry
 	// stack, so contention is nonexistent.
+	//nolint:forbidigo // guards exactly one field, the package-level shutdowns slice; it is the innermost and only lock in the process, so there is no lock ordering to observe (never held across a call into other code — see docs/adr/0002-telemetry-shutdown-registry-keeps-a-mutex.md).
 	shutdownMu sync.Mutex
 	shutdowns  []func(context.Context) error
 
@@ -325,6 +336,12 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 //
 // Safe before Initialize: with no instruments stored yet the metric writes are
 // skipped and only the (no-op) span is produced. Safe for concurrent calls.
+// The body is straight-line; the cognitive-complexity score comes entirely
+// from the two closures the mcpserver.ToolHandlerMiddleware signature
+// requires, which add a nesting penalty to every statement inside them.
+// Splitting them out would move code without removing a single branch.
+//
+//nolint:gocognit // nesting penalty from the required two-closure signature, see above
 func ToolHandlerMiddleware() mcpserver.ToolHandlerMiddleware {
 	return func(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

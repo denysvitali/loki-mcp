@@ -35,7 +35,7 @@ func routePattern(t *testing.T, h http.Handler, path string) string {
 	t.Helper()
 	mux, ok := h.(*http.ServeMux)
 	require.True(t, ok, "newMux must return an *http.ServeMux")
-	_, pattern := mux.Handler(httptest.NewRequest(http.MethodGet, path, nil))
+	_, pattern := mux.Handler(httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
 	return pattern
 }
 
@@ -96,7 +96,8 @@ func TestServeContextAlreadyDone(t *testing.T) {
 // TestServeListenError covers the failure path: a listen error is wrapped and
 // returned, and serve still joins its goroutine.
 func TestServeListenError(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
@@ -114,7 +115,8 @@ func TestServeListenError(t *testing.T) {
 
 func freePort(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	require.NoError(t, ln.Close())
@@ -123,7 +125,8 @@ func freePort(t *testing.T) string {
 
 // waitForServer reports whether addr accepts connections before the deadline,
 // giving up early if the server goroutine has already failed.
-func waitForServer(addr string, errCh <-chan error) error {
+func waitForServer(ctx context.Context, addr string, errCh <-chan error) error {
+	dialer := net.Dialer{Timeout: 100 * time.Millisecond}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
@@ -131,7 +134,7 @@ func waitForServer(addr string, errCh <-chan error) error {
 			return fmt.Errorf("server exited before listening: %w", err)
 		default:
 		}
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -161,7 +164,7 @@ func startRunHTTP(t *testing.T, disableSSE bool) (addr string, errCh chan error)
 				DisableSSE: disableSSE,
 			}, handlers.Config{})
 		}()
-		if err := waitForServer(addr, errCh); err == nil {
+		if err := waitForServer(t.Context(), addr, errCh); err == nil {
 			return addr, errCh
 		} else if i == attempts-1 {
 			t.Fatalf("RunHTTP never came up in %d attempts: %v", attempts, err)
@@ -188,7 +191,11 @@ func TestRunHTTP(t *testing.T) {
 
 			// Bogus POST to /stream must produce an HTTP-level MCP error
 			// response, not a panic or a hang.
-			resp, err := http.Post("http://"+addr+"/stream", "application/json", strings.NewReader("{not json"))
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+				"http://"+addr+"/stream", strings.NewReader("{not json"))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
 			require.NoError(t, err)
 			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
@@ -197,7 +204,10 @@ func TestRunHTTP(t *testing.T) {
 			assert.Contains(t, string(body), "error")
 
 			// /sse is served by default and gone with DisableSSE.
-			sseResp, err := http.Get("http://" + addr + "/sse")
+			sseReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+				"http://"+addr+"/sse", nil)
+			require.NoError(t, err)
+			sseResp, err := http.DefaultClient.Do(sseReq)
 			require.NoError(t, err)
 			if tt.disableSSE {
 				_ = sseResp.Body.Close()

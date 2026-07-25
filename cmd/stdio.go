@@ -14,7 +14,7 @@ var stdioCmd = &cobra.Command{
 and other MCP clients that communicate via stdin/stdout.
 
 All log output is sent to stderr to avoid interfering with the MCP protocol.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(_ *cobra.Command, _ []string) error {
 		if err := server.RunStdio(Version, handlerConfig); err != nil {
 			logging.Errorf("Stdio server error: %v", err)
 			return err

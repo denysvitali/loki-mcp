@@ -408,6 +408,8 @@ func TestHandleLokiQuery_QueryFilterMerge(t *testing.T) {
 	h := New(newTestConfig(t, `{namespace="prod"}`, false))
 
 	t.Run("merged into the client query", func(t *testing.T) {
+		t.Parallel()
+
 		srv, captured := newFakeQueryLoki(t, queryRangeBody)
 		args := map[string]any{"query": `{job="api"}`, "url": srv.URL}
 
@@ -421,6 +423,8 @@ func TestHandleLokiQuery_QueryFilterMerge(t *testing.T) {
 	})
 
 	t.Run("unparseable client query is rejected", func(t *testing.T) {
+		t.Parallel()
+
 		srv, _ := newFakeQueryLoki(t, queryRangeBody)
 		args := map[string]any{"query": "not a logql query", "url": srv.URL}
 

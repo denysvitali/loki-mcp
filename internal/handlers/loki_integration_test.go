@@ -96,7 +96,7 @@ func PushLogs(ctx context.Context, lokiURL string, streams []LokiStream) error {
 	if err != nil {
 		return fmt.Errorf("failed to push logs: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -549,6 +549,7 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 		{
 			format: "raw",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				// Raw format: one label per line
 				assert.Contains(t, text, "job", "Raw format should contain 'job'")
 			},
@@ -556,6 +557,7 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 		{
 			format: "json",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				var jsonResult map[string]interface{}
 				err := json.Unmarshal([]byte(text), &jsonResult)
 				require.NoError(t, err, "JSON format should be valid JSON")
@@ -566,6 +568,7 @@ func TestIntegration_LokiLabelNames_AllFormats(t *testing.T) {
 		{
 			format: "text",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				assert.Contains(t, text, "Found", "Text format should contain 'Found'")
 				assert.Contains(t, text, "labels", "Text format should contain 'labels'")
 			},
@@ -676,6 +679,7 @@ func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
 		{
 			format: "raw",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				// Raw format: one value per line
 				lines := strings.Split(strings.TrimSpace(text), "\n")
 				assert.Greater(t, len(lines), 0, "Raw format should have at least one value")
@@ -684,6 +688,7 @@ func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
 		{
 			format: "json",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				var jsonResult map[string]interface{}
 				err := json.Unmarshal([]byte(text), &jsonResult)
 				require.NoError(t, err, "JSON format should be valid JSON")
@@ -694,6 +699,7 @@ func TestIntegration_LokiLabelValues_AllFormats(t *testing.T) {
 		{
 			format: "text",
 			validate: func(t *testing.T, text string) {
+				t.Helper()
 				assert.Contains(t, text, "Found", "Text format should contain 'Found'")
 				assert.Contains(t, text, "values for label", "Text format should contain 'values for label'")
 			},

@@ -17,7 +17,7 @@ Endpoints:
   /stream - Streamable HTTP endpoint (modern clients)
   /sse    - SSE event stream (legacy, can be disabled)
   /mcp    - SSE message endpoint (legacy, can be disabled)`,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(_ *cobra.Command, _ []string) error {
 		cfg := server.HTTPConfig{
 			Host:       viper.GetString("host"),
 			Port:       viper.GetString("port"),

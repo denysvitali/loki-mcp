@@ -191,14 +191,14 @@ func TestToolHandlerMiddlewareSpanError(t *testing.T) {
 	}{
 		{
 			name: "nil error",
-			next: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			next: func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				return mcp.NewToolResultText("ok"), nil
 			},
 			wantAttr: false,
 		},
 		{
 			name: "go error",
-			next: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			next: func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				return nil, errNext
 			},
 			wantErr:     true,
@@ -207,7 +207,7 @@ func TestToolHandlerMiddlewareSpanError(t *testing.T) {
 		},
 		{
 			name: "result IsError",
-			next: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			next: func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				return mcp.NewToolResultError("bad"), nil
 			},
 			wantAttr: true,
@@ -284,7 +284,7 @@ func TestToolHandlerMiddlewareAndSecretMetrics(t *testing.T) {
 	mw := ToolHandlerMiddleware()
 	req := mcp.CallToolRequest{}
 	req.Params.Name = "loki_query"
-	_, err := mw(func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	_, err := mw(func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultText("ok"), nil
 	})(context.Background(), req)
 	require.NoError(t, err)
