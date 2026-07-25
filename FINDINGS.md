@@ -33,6 +33,7 @@ Everything else was executed.
 | 12 | Secret-filter note is reported two different ways | Low | yes |
 | 13 | `version` writes to process stdout, bypassing cobra's writer | Low | yes |
 | 14 | Compose `log-generator` output never reaches Loki | Low | by reading only |
+| 15 | `--query-filter` silently discards pipeline stages | Medium | yes |
 
 ---
 
@@ -975,3 +976,135 @@ straight to `/loki/api/v1/push` and does not involve promtail.
 Add a `docker_sd_configs` scrape job to `docker/promtail/config.yml` (the socket
 is already mounted), or drop the `log-generator` service and rely on
 `insert-loki-logs.sh`.
+
+---
+
+## 15. `--query-filter` silently discards everything but the stream selector
+
+**Severity:** Medium
+**Location:** `internal/handlers/filter.go:25-38` (`ParseFilter`),
+`cmd/root.go:120-141` (`buildHandlerConfig`), `cmd/root.go:184-185`
+(the `--query-filter` flag description)
+**Reproduced:** yes — end to end against a fake Loki, and pinned by
+`ExampleParseFilter` in `internal/handlers/example_test.go`.
+
+### What happens
+
+`--query-filter` (and `LOKI_QUERY_FILTER`) accepts any LogQL *log selector*,
+which includes pipeline stages. Only the stream matchers survive. An operator
+who writes
+
+```
+--query-filter='{namespace="prod"} |= "error"'
+```
+
+gets `{namespace="prod"}` enforced and the `|= "error"` line filter thrown
+away. Nothing rejects it and nothing warns: the startup log even echoes the
+full string back, `Query filter configured: {namespace="prod"} |= "error"`,
+which reads as confirmation that the pipeline is in force.
+
+### Why
+
+`ParseFilter` parses with `syntax.ParseLogSelector(filter, true)` — which
+accepts a pipeline — and then keeps only `expr.Matchers()`:
+
+```go
+expr, err := syntax.ParseLogSelector(filter, true)
+if err != nil {
+    return nil, fmt.Errorf("invalid LogQL stream selector %q: %w", filter, err)
+}
+
+return expr.Matchers(), nil
+```
+
+`Matchers()` returns the stream-selector matchers of the expression; every
+pipeline stage (line filters, label filters, parsers, `line_format`, …) is on
+the AST node that is discarded with `expr`. `Config.QueryFilter` is therefore a
+`[]*labels.Matcher`, and both consumers — `MergeQueryWithFilter`, which ANDs
+the matchers into the client's selector, and `BuildFilterSelector`, which
+renders them for the label endpoints — can only ever see matchers. The
+information is gone before it reaches them.
+
+The metric-query case is rejected (`rate({job="api"}[5m])` →
+`only log selector is supported`), so the parser clearly does validate shape.
+Pipelines just fall inside the accepted shape and are then dropped.
+
+### Reproduction
+
+```bash
+go build -o /tmp/lokimcp .
+
+# a fake Loki that prints the query parameter it is asked for
+python3 - <<'PY' & sleep 1
+import http.server, json, urllib.parse
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        print("REQ", u.path, urllib.parse.parse_qs(u.query).get("query"), flush=True)
+        b = json.dumps({"status":"success","data":{"resultType":"streams","result":[]}}).encode()
+        if u.path.endswith("/labels"):
+            b = json.dumps({"status":"success","data":[]}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", 3199), H).serve_forever()
+PY
+
+printf '%s\n' \
+'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}' \
+'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"loki_query","arguments":{"query":"{job=\"api\"}"}}}' \
+| /tmp/lokimcp stdio --url http://127.0.0.1:3199 \
+    --query-filter='{namespace="prod"} |= "error"' --secret-filter=false
+```
+
+Output from the fake Loki:
+
+```
+REQ /loki/api/v1/query_range ['{namespace="prod", job="api"}']
+```
+
+The same session's stderr:
+
+```
+level=info msg="Query filter configured: {namespace=\"prod\"} |= \"error\""
+```
+
+The unit-level form is one line:
+
+```go
+matchers, _ := handlers.ParseFilter(`{namespace="prod"} |= "error"`)
+// len(matchers) == 1, matchers[0] is namespace="prod"
+```
+
+Behaviour is identical on the `7441901` baseline binary, so this predates the
+refactor.
+
+### Expected vs actual
+
+- **Expected:** either the line filter is enforced on every query
+  (`{namespace="prod", job="api"} |= "error"`), or the flag refuses a filter it
+  cannot enforce.
+- **Actual:** `{namespace="prod", job="api"}` goes to Loki. The restriction the
+  operator wrote is silently weaker in production than on the command line, and
+  the startup log claims otherwise.
+
+This is the reason it is not merely cosmetic: `--query-filter` is the multi-tenant
+containment control (`README.md:105`, `CLAUDE.md:143`). An operator who uses a
+pipeline stage to keep some class of line out of an assistant's reach believes
+it is enforced. It is not.
+
+### Suggested fix (not implemented)
+
+Cheapest and safest: **fail closed**. In `ParseFilter`, reject anything that is
+not a bare stream selector — after parsing, type-assert the result to
+`*syntax.MatchersExpr` (or compare `expr.String()` against the rendered
+matchers) and return an error naming the discarded stage, matching the existing
+`only log selector is supported` style. That keeps `Config.QueryFilter` a
+matcher slice and turns a silent downgrade into a startup failure the operator
+can see.
+
+The larger fix — carry the whole filter expression and splice its pipeline into
+each client query — changes `Config`, `MergeQueryWithFilter` and
+`BuildFilterSelector` (the label endpoints have no pipeline to attach one to at
+all), so it is a design change, not a patch.
