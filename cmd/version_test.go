@@ -18,20 +18,33 @@ func TestVersionCommand(t *testing.T) {
 	prev := Version
 	t.Cleanup(func() { Version = prev })
 
+	var out bytes.Buffer
+	versionCmd.SetOut(&out)
+	t.Cleanup(func() { versionCmd.SetOut(nil) })
+
 	Version = "1.2.3"
-	out := captureStdout(t, func() { versionCmd.Run(versionCmd, nil) })
-	assert.Equal(t, "loki-mcp 1.2.3\n", out)
+	versionCmd.Run(versionCmd, nil)
+	assert.Equal(t, "loki-mcp 1.2.3\n", out.String())
 }
 
-// TestVersionWritesToProcessStdout pins that the command prints with
-// fmt.Println rather than cmd.OutOrStdout: cobra's output writer is ignored.
-func TestVersionWritesToProcessStdout(t *testing.T) {
+// TestVersionWritesToCobraWriter pins that the command prints through
+// cmd.OutOrStdout, so a writer installed with SetOut captures it and nothing
+// reaches the process stdout. It used to print with fmt.Println, which ignored
+// cobra's writer (FINDINGS.md §13).
+func TestVersionWritesToCobraWriter(t *testing.T) {
 	var cobraOut bytes.Buffer
 	versionCmd.SetOut(&cobraOut)
 	t.Cleanup(func() { versionCmd.SetOut(nil) })
 
-	out := captureStdout(t, func() { versionCmd.Run(versionCmd, nil) })
+	processOut := captureStdout(t, func() { versionCmd.Run(versionCmd, nil) })
 
+	assert.Equal(t, "loki-mcp "+Version+"\n", cobraOut.String())
+	assert.Empty(t, processOut, "nothing bypasses the writer onto fd 1")
+}
+
+// TestVersionFallsBackToStdout pins the no-writer case: with nothing installed
+// by SetOut, cmd.OutOrStdout resolves to the process stdout as before.
+func TestVersionFallsBackToStdout(t *testing.T) {
+	out := captureStdout(t, func() { versionCmd.Run(versionCmd, nil) })
 	assert.Equal(t, "loki-mcp "+Version+"\n", out)
-	assert.Empty(t, cobraOut.String())
 }

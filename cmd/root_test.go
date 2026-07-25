@@ -1,8 +1,9 @@
 package cmd
 
 import (
-	"io"
+	"bytes"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -39,8 +40,9 @@ func TestSubcommandsRegistered(t *testing.T) {
 }
 
 // TestPersistentPreRunEAppliesToEverySubcommand pins that no subcommand
-// overrides the root hook, so all of them - including version - run the full
-// setup chain. See TestVersionRequiresLoki for the consequence.
+// overrides the root hook, so all of them - including version - run the same
+// setup chain: logging, telemetry and the handler config. The Loki
+// connectivity check is not part of it; see TestVersionWorksWithoutLoki.
 func TestPersistentPreRunEAppliesToEverySubcommand(t *testing.T) {
 	require.NotNil(t, rootCmd.PersistentPreRunE)
 
@@ -172,14 +174,14 @@ func TestPingLoki(t *testing.T) {
 	})
 }
 
-// TestPersistentPreRunESuccess runs the real hook end to end against a fake
-// Loki, with the OTel SDK disabled so Initialize installs no exporters.
+// TestPersistentPreRunESuccess runs the real hook end to end with the OTel SDK
+// disabled so Initialize installs no exporters. Loki is pointed at a closed
+// port to pin that the hook itself never touches it.
 func TestPersistentPreRunESuccess(t *testing.T) {
 	isolateViper(t)
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 
-	url, _ := fakeLoki(t)
-	viper.Set("url", url)
+	viper.Set("url", closedLokiAddr(t))
 	viper.Set("secret-filter", true)
 
 	prev := handlerConfig
@@ -190,25 +192,182 @@ func TestPersistentPreRunESuccess(t *testing.T) {
 	assert.NotNil(t, handlerConfig.Detector, "the hook publishes the built config")
 }
 
-// TestVersionRequiresLoki pins a known wart, reported in the audit and not
-// fixed here: the root hook pings Loki before every subcommand, so
-// `loki-mcp version` fails when Loki is down and prints nothing.
-func TestVersionRequiresLoki(t *testing.T) {
+// TestVersionWorksWithoutLoki pins that `version` no longer needs a reachable
+// Loki. The root hook used to end in pingLoki, and cobra runs it for every
+// runnable command, so version exited 1 with an empty stdout whenever Loki was
+// down (FINDINGS.md §3).
+func TestVersionWorksWithoutLoki(t *testing.T) {
 	isolateViper(t)
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 	viper.Set("url", closedLokiAddr(t))
 
-	out := captureStdout(t, func() {
-		err := executeRoot(t, "version")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "loki connectivity check failed: ")
-	})
-	assert.Empty(t, out, "the subcommand never runs")
+	prev := Version
+	t.Cleanup(func() { Version = prev })
+	Version = "1.2.3"
+
+	out, errOut, err := executeRoot(t, "version")
+
+	require.NoError(t, err)
+	assert.Equal(t, "loki-mcp 1.2.3\n", out)
+	assert.Empty(t, errOut)
 }
 
-// executeRoot runs the root command with args, discarding cobra's own output
-// and restoring the mutated command state afterwards.
-func executeRoot(t *testing.T, args ...string) error {
+// TestHelpAndCompletionWorkWithoutLoki pins the other two commands the ping
+// used to break, which made shell-completion installation impossible on any
+// machine without Loki.
+func TestHelpAndCompletionWorkWithoutLoki(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		// completion writes to a writer cobra captured when the command was
+		// created (see TestMain), so only help's output is observable here.
+		// Both are checked for exit status and a silent stderr.
+		wantOutput bool
+	}{
+		{name: "help", args: []string{"help"}, wantOutput: true},
+		{name: "completion bash", args: []string{"completion", "bash"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateViper(t)
+			t.Setenv("OTEL_SDK_DISABLED", "true")
+			viper.Set("url", closedLokiAddr(t))
+
+			out, errOut, err := executeRoot(t, tt.args...)
+
+			require.NoError(t, err)
+			assert.Empty(t, errOut)
+			if tt.wantOutput {
+				assert.Contains(t, out, "Available Commands:",
+					"the command still prints its normal output")
+			}
+		})
+	}
+}
+
+// TestServingCommandsPingLoki pins that the check moved rather than
+// disappeared: every command that serves traffic still refuses to start when
+// Loki is unreachable, with the same wrapped message, before binding anything.
+func TestServingCommandsPingLoki(t *testing.T) {
+	tests := map[string][]string{
+		"bare invocation": {},
+		"stdio":           {"stdio"},
+		"http":            {"http"},
+	}
+
+	for name, args := range tests {
+		t.Run(name, func(t *testing.T) {
+			isolateViper(t)
+			t.Setenv("OTEL_SDK_DISABLED", "true")
+			viper.Set("url", closedLokiAddr(t))
+
+			_, errOut, err := executeRoot(t, args...)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "loki connectivity check failed: ")
+			assert.Contains(t, errOut, "Error: loki connectivity check failed: ")
+		})
+	}
+}
+
+// TestRuntimeFailureSilencesUsage pins SilenceUsage: an unreachable Loki is
+// not misuse of the command line and no longer dumps the whole usage block
+// after the error.
+func TestRuntimeFailureSilencesUsage(t *testing.T) {
+	require.True(t, rootCmd.SilenceUsage)
+
+	isolateViper(t)
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	viper.Set("url", closedLokiAddr(t))
+
+	out, errOut, err := executeRoot(t, "stdio")
+
+	require.Error(t, err)
+	assert.NotContains(t, out, "Usage:")
+	assert.NotContains(t, errOut, "Usage:")
+}
+
+// TestFlagErrorStillPrintsUsage pins the other half: a genuine flag-parsing
+// error is misuse, so the usage block survives SilenceUsage through the
+// SetFlagErrorFunc hook.
+func TestFlagErrorStillPrintsUsage(t *testing.T) {
+	// The hook clears SilenceUsage on the commands it touches.
+	t.Cleanup(func() {
+		rootCmd.SilenceUsage = true
+		stdioCmd.SilenceUsage = false
+	})
+
+	t.Run("root", func(t *testing.T) {
+		out, errOut, err := executeRoot(t, "--nosuchflag")
+
+		require.Error(t, err)
+		assert.Contains(t, errOut, "unknown flag: --nosuchflag")
+		assert.Contains(t, out, "Usage:")
+	})
+
+	t.Run("subcommand", func(t *testing.T) {
+		rootCmd.SilenceUsage = true
+
+		out, errOut, err := executeRoot(t, "stdio", "--nosuchflag")
+
+		require.Error(t, err)
+		assert.Contains(t, errOut, "unknown flag: --nosuchflag")
+		assert.Contains(t, out, "Usage:")
+	})
+}
+
+// TestRootRunEIsStdio pins that a bare `loki-mcp` is literally the stdio
+// command: rootCmd is runnable, and its RunE is the same function stdioCmd
+// uses. Before FINDINGS.md §1 was fixed rootCmd had no Run at all, so the bare
+// invocation printed help and exited 0 without starting any server.
+func TestRootRunEIsStdio(t *testing.T) {
+	require.NotNil(t, rootCmd.RunE, "a bare invocation must be runnable")
+	assert.Nil(t, rootCmd.Run, "RunE, not Run: startup failures must be errors")
+
+	want := reflect.ValueOf(runStdio).Pointer()
+	assert.Equal(t, want, reflect.ValueOf(rootCmd.RunE).Pointer(),
+		"the bare invocation must run stdio")
+	assert.Equal(t, want, reflect.ValueOf(stdioCmd.RunE).Pointer(),
+		"`loki-mcp stdio` must stay identical to the bare invocation")
+}
+
+// TestBareInvocationServes pins the observable half of the same fix: with no
+// subcommand the binary enters the serving path — proven here by the Loki
+// connectivity check failing — instead of printing help and exiting 0.
+func TestBareInvocationServes(t *testing.T) {
+	isolateViper(t)
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	viper.Set("url", closedLokiAddr(t))
+
+	out, _, err := executeRoot(t)
+
+	require.Error(t, err, "a bare invocation must not exit 0 having started nothing")
+	assert.Contains(t, err.Error(), "loki connectivity check failed: ")
+	assert.NotContains(t, out, "Use subcommands to pick a mode explicitly",
+		"the long help is not the bare invocation's output any more")
+}
+
+// TestUnknownSubcommandStillFails pins that making the root runnable did not
+// turn a typo into a silently started stdio server.
+func TestUnknownSubcommandStillFails(t *testing.T) {
+	isolateViper(t)
+
+	_, _, err := executeRoot(t, "nosuchcommand")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown command "nosuchcommand" for "loki-mcp"`)
+}
+
+// executeRoot runs the root command with args and returns what cobra wrote
+// through its out writer (command output and the usage block) and its err
+// writer (the "Error: …" line), restoring the mutated command state
+// afterwards.
+//
+// The empty argument list is passed as a non-nil slice on purpose: cobra falls
+// back to os.Args when SetArgs was given nil, which under `go test` means the
+// test binary's own flags.
+func executeRoot(t *testing.T, args ...string) (out, errOut string, err error) {
 	t.Helper()
 
 	prev := handlerConfig
@@ -219,9 +378,16 @@ func executeRoot(t *testing.T, args ...string) error {
 		rootCmd.SetErr(nil)
 	})
 
-	rootCmd.SetArgs(args)
-	rootCmd.SetOut(io.Discard)
-	rootCmd.SetErr(io.Discard)
+	if args == nil {
+		args = []string{}
+	}
 
-	return rootCmd.Execute()
+	var outBuf, errBuf bytes.Buffer
+	rootCmd.SetArgs(args)
+	rootCmd.SetOut(&outBuf)
+	rootCmd.SetErr(&errBuf)
+
+	err = rootCmd.Execute()
+
+	return outBuf.String(), errBuf.String(), err
 }
