@@ -155,9 +155,9 @@ func applyHeadTail(entries []logEntry, head, tail int) []logEntry {
 // format, grouping entries by their label set and preserving the entry order
 // within each stream.
 //
-// The order of the streams themselves is nondeterministic: they are emitted by
-// ranging a map, and Go randomises map iteration. Two identical queries can
-// return the same streams in different orders (FINDINGS.md §5).
+// The grouping runs through a map, whose iteration order Go randomises, so the
+// streams are sorted by label-set string before they are returned. Without
+// that, two identical queries could emit the same streams in different orders.
 func entriesToStreams(entries []logEntry) loghttp.Streams {
 	if len(entries) == 0 {
 		return loghttp.Streams{}
@@ -185,9 +185,15 @@ func entriesToStreams(entries []logEntry) loghttp.Streams {
 		}
 	}
 
-	var streams loghttp.Streams
-	for _, stream := range streamMap {
-		streams = append(streams, *stream)
+	keys := make([]string, 0, len(streamMap))
+	for key := range streamMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	streams := make(loghttp.Streams, 0, len(keys))
+	for _, key := range keys {
+		streams = append(streams, *streamMap[key])
 	}
 
 	return streams

@@ -438,6 +438,31 @@ func TestHandleLokiQuery_OrderIsNewestFirst(t *testing.T) {
 	}
 }
 
+// TestHandleLokiQuery_StreamOrderIsStable pins that a post-processed
+// multi-stream response comes back in the same order every time. The regrouping
+// runs through a map, so a single call would pass by chance.
+func TestHandleLokiQuery_StreamOrderIsStable(t *testing.T) {
+	srv, _ := newFakeQueryLoki(t, queryRangeBody)
+	h := newTestHandlers(t)
+
+	// The keyword filter forces post-processing; both matching lines survive,
+	// one per stream, so the output shows the stream order directly.
+	args := map[string]any{"query": `{job=~".+"}`, "url": srv.URL, "filter": "error"}
+
+	want := "2024-01-15T10:00:00Z {job=\"api\"} alpha ERROR one\n" +
+		"2024-01-15T10:00:02Z {job=\"web\"} gamma error three\n"
+
+	for i := 0; i < 50; i++ {
+		res, err := h.HandleQuery(context.Background(), queryRequest(args))
+		if err != nil {
+			t.Fatalf("iteration %d: HandleQuery returned error: %v", i, err)
+		}
+		if got := resultText(t, res); got != want {
+			t.Fatalf("iteration %d: output =\n%q\nwant\n%q", i, got, want)
+		}
+	}
+}
+
 // TestHandleLokiQuery_HeadTailRejected pins the mutual-exclusion error.
 func TestHandleLokiQuery_HeadTailRejected(t *testing.T) {
 	t.Parallel()

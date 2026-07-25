@@ -317,9 +317,15 @@ func TestEntriesToStreams(t *testing.T) {
 
 	streams := entriesToStreams(entries)
 
-	// Should have 2 streams (grouped by labels)
+	// Should have 2 streams (grouped by labels), ordered by label-set string.
 	if len(streams) != 2 {
-		t.Errorf("Expected 2 streams, got %d", len(streams))
+		t.Fatalf("Expected 2 streams, got %d", len(streams))
+	}
+	wantLabels := []string{`{job="other"}`, `{job="test"}`}
+	for i, want := range wantLabels {
+		if got := streams[i].Labels.String(); got != want {
+			t.Errorf("stream %d labels = %s, want %s", i, got, want)
+		}
 	}
 
 	// Count total entries across streams
@@ -329,6 +335,36 @@ func TestEntriesToStreams(t *testing.T) {
 	}
 	if totalEntries != 3 {
 		t.Errorf("Expected 3 total entries across streams, got %d", totalEntries)
+	}
+}
+
+// TestEntriesToStreams_StableOrder pins that the stream order does not depend
+// on Go's randomised map iteration. The grouping runs through a map, so a
+// single pass would agree with an unsorted implementation by chance; only
+// repetition catches it.
+func TestEntriesToStreams_StableOrder(t *testing.T) {
+	jobs := []string{"eee", "aaa", "ccc", "bbb", "ddd"}
+	entries := make([]logEntry, 0, len(jobs))
+	for i, job := range jobs {
+		entries = append(entries, logEntry{
+			Timestamp: time.Date(2024, 1, 1, 0, 0, i, 0, time.UTC),
+			Line:      "line from " + job,
+			Labels:    loghttp.LabelSet{"job": job},
+		})
+	}
+
+	want := []string{`{job="aaa"}`, `{job="bbb"}`, `{job="ccc"}`, `{job="ddd"}`, `{job="eee"}`}
+
+	for i := 0; i < 50; i++ {
+		streams := entriesToStreams(entries)
+		if len(streams) != len(want) {
+			t.Fatalf("iteration %d: got %d streams, want %d", i, len(streams), len(want))
+		}
+		for j, w := range want {
+			if got := streams[j].Labels.String(); got != w {
+				t.Fatalf("iteration %d: stream %d labels = %s, want %s", i, j, got, w)
+			}
+		}
 	}
 }
 
