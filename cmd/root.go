@@ -15,26 +15,29 @@ import (
 	"github.com/kaiko-ai/loki-mcp/internal/telemetry"
 )
 
-// envFlag registers a string flag on fs, binds it to viper, and appends the
-// resolved env var to the usage string so --help surfaces it. The env var is
-// derived as <LOKI_PREFIX>_<NAME> with dashes replaced by underscores, matching
-// viper's AutomaticEnv + key replacer configuration.
-func envFlag(fs *pflag.FlagSet, name, shorthand, def, usage string) {
+// envUsage appends the environment variable viper will resolve for the flag to
+// its usage string, so --help surfaces it. The name is derived the same way
+// viper's AutomaticEnv + key replacer derive it: <PREFIX>_<NAME>, upper-cased,
+// dashes replaced by underscores. Deriving it here rather than spelling it out
+// at each call site keeps --help from going stale.
+func envUsage(name, usage string) string {
 	env := strings.ReplaceAll(strings.ToUpper(name), "-", "_")
 	if prefix := viper.GetEnvPrefix(); prefix != "" {
 		env = prefix + "_" + env
 	}
-	fs.StringP(name, shorthand, def, fmt.Sprintf("%s [env: %s]", usage, env))
+	return fmt.Sprintf("%s [env: %s]", usage, env)
+}
+
+// envFlag registers a string flag on fs, binds it to viper, and documents its
+// environment variable.
+func envFlag(fs *pflag.FlagSet, name, shorthand, def, usage string) {
+	fs.StringP(name, shorthand, def, envUsage(name, usage))
 	_ = viper.BindPFlag(name, fs.Lookup(name))
 }
 
 // envBoolFlag is envFlag's boolean equivalent.
 func envBoolFlag(fs *pflag.FlagSet, name, shorthand string, def bool, usage string) {
-	env := strings.ReplaceAll(strings.ToUpper(name), "-", "_")
-	if prefix := viper.GetEnvPrefix(); prefix != "" {
-		env = prefix + "_" + env
-	}
-	fs.BoolP(name, shorthand, def, fmt.Sprintf("%s [env: %s]", usage, env))
+	fs.BoolP(name, shorthand, def, envUsage(name, usage))
 	_ = viper.BindPFlag(name, fs.Lookup(name))
 }
 
