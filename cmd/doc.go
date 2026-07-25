@@ -52,6 +52,4 @@
 //     Loki is unreachable.
 //   - §8: the port flag is bound to PORT by hand, but viper's AutomaticEnv
 //     resolves LOKI_PORT first, so the undocumented LOKI_PORT wins.
-//   - §13: the version subcommand writes to os.Stdout via fmt.Println and so
-//     ignores any writer installed with SetOut.
 package cmd
