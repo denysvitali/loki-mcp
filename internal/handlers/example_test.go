@@ -16,10 +16,11 @@ func ExampleParseFilter() {
 		fmt.Println(m)
 	}
 
-	// A pipeline parses, but only the stream matchers survive: the line
-	// filter is silently discarded.
-	matchers, _ = handlers.ParseFilter(`{namespace="prod"} |= "error"`)
-	fmt.Println(len(matchers), matchers[0])
+	// A pipeline parses as LogQL, but its stages cannot be carried into the
+	// matcher slice Config holds, so it is refused rather than enforced as
+	// the weaker selector alone.
+	_, err = handlers.ParseFilter(`{namespace="prod"} |= "error"`)
+	fmt.Println(err)
 
 	// Blank means "unrestricted", not "match nothing", and is not an error.
 	matchers, err = handlers.ParseFilter("   ")
@@ -32,7 +33,7 @@ func ExampleParseFilter() {
 	// Output:
 	// namespace="prod"
 	// job=~"api.*"
-	// 1 namespace="prod"
+	// invalid LogQL stream selector "{namespace=\"prod\"} |= \"error\"": only bare stream selectors are supported, but "|= \"error\"" cannot be enforced and would be silently discarded
 	// true <nil>
 	// invalid LogQL stream selector "rate({job=\"api\"}[5m])": only log selector is supported
 }

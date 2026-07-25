@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/betterleaks/betterleaks/detect"
 	"github.com/prometheus/prometheus/model/labels"
@@ -23,6 +24,8 @@ type Config struct {
 	// Detector scans returned log lines for secrets; a line with any finding
 	// is dropped from the response entirely. nil disables secret filtering,
 	// and is the only way to disable it — there is no separate boolean.
+	// A non-nil Detector is the process-wide shared one (see sharedDetector);
+	// it is read-only and must not be reconfigured through this field.
 	Detector *detect.Detector
 }
 
@@ -30,25 +33,33 @@ type Config struct {
 // control it. It returns the zero Config together with the error on any
 // failure, so a partially built configuration is never handed back.
 //
-// rawFilter is a LogQL stream selector such as `{namespace="prod"}`. Empty
-// leaves QueryFilter nil and queries unrestricted; anything else goes through
-// ParseFilter, and an unparseable selector is an error. A whitespace-only
-// rawFilter also yields a nil QueryFilter, because ParseFilter trims first.
+// rawFilter is a bare LogQL stream selector such as `{namespace="prod"}`.
+// Empty leaves QueryFilter nil and queries unrestricted; anything else goes
+// through ParseFilter, and an unparseable selector — or one carrying a
+// pipeline, which ParseFilter refuses rather than silently dropping — is an
+// error. A whitespace-only rawFilter also yields a nil QueryFilter, because
+// ParseFilter trims first.
 //
-// secretFilter=true builds a betterleaks detector with the default ruleset and
-// sets SkipFindingAppend, so concurrent scans accumulate nothing in the shared
-// detector. secretFilter=false leaves Detector nil. Constructing the detector
-// compiles the full default ruleset and costs on the order of tens of
-// milliseconds, which is why it happens once at startup and not per request.
+// secretFilter=true gives Config the process-wide betterleaks detector, built
+// with the default ruleset and SkipFindingAppend set, so concurrent scans
+// accumulate nothing in it. secretFilter=false leaves Detector nil.
+// Constructing the detector compiles the full default ruleset and costs on the
+// order of tens of milliseconds, which is why it happens once at startup and
+// not per request.
+//
+// NewConfig is safe to call concurrently, and every caller that asks for
+// secret filtering gets the *same* *detect.Detector — see sharedDetector for
+// why there must only ever be one. Do not write to the returned
+// Config.Detector: it is shared, and the whole Config is documented as
+// immutable after construction.
 func NewConfig(rawFilter string, secretFilter bool) (Config, error) {
 	var cfg Config
 
 	if secretFilter {
-		detector, err := detect.NewDetectorDefaultConfig()
+		detector, err := sharedDetector()
 		if err != nil {
-			return Config{}, fmt.Errorf("initialize secret detector: %w", err)
+			return Config{}, err
 		}
-		detector.SkipFindingAppend = true
 		cfg.Detector = detector
 	}
 
@@ -61,6 +72,48 @@ func NewConfig(rawFilter string, secretFilter bool) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// sharedDetectorOnce guards sharedDetectorValue and sharedDetectorErr below.
+// sync.Once rather than a lock because the value is built once and then only
+// read, which is also what .golangci.yml's forbidigo rule against sync.Mutex
+// asks for.
+var (
+	sharedDetectorOnce  sync.Once
+	sharedDetectorValue *detect.Detector
+	sharedDetectorErr   error
+)
+
+// sharedDetector returns the one betterleaks detector this process ever
+// builds, constructing it on first use.
+//
+// There is deliberately only one. (*detect.Detector).Tokenizer() is guarded by
+// a *per-detector* sync.Once whose body calls the *process-global*
+// tiktoken.SetBpeLoader, an unsynchronised assignment to a package variable in
+// github.com/pkoukk/tiktoken-go. Two detectors each run their own Once and
+// both write that global, so two detectors scanning concurrently race inside
+// the dependency (FINDINGS.md §11 — the real fix belongs upstream). With a
+// single detector its own Once serialises the write and the hazard is gone;
+// building it under this Once additionally makes concurrent NewConfig calls
+// safe.
+//
+// The detector is immutable once built — SkipFindingAppend is set inside the
+// Once, before any caller can see it — and betterleaks scans are safe to run
+// concurrently against it, which is what makes sharing it sound.
+//
+// A construction failure is remembered: once it fails it fails identically for
+// the rest of the process rather than being retried per call.
+func sharedDetector() (*detect.Detector, error) {
+	sharedDetectorOnce.Do(func() {
+		d, err := detect.NewDetectorDefaultConfig()
+		if err != nil {
+			sharedDetectorErr = fmt.Errorf("initialize secret detector: %w", err)
+			return
+		}
+		d.SkipFindingAppend = true
+		sharedDetectorValue = d
+	})
+	return sharedDetectorValue, sharedDetectorErr
 }
 
 // Handlers is the set of three MCP tools this binary serves. It owns no

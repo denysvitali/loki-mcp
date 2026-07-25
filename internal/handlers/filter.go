@@ -16,12 +16,15 @@ import (
 // Callers treat a nil matcher slice as "unrestricted", so a blank filter
 // disables filtering rather than matching nothing.
 //
-// Only *log* selectors parse. A pipeline is accepted but silently reduced to
-// its stream matchers: `{namespace="prod"} |= "error"` yields the single
-// matcher namespace="prod" and the line filter is discarded. A metric query
-// such as `rate({job="api"}[5m])` is rejected with "only log selector is
-// supported", as is any syntactically invalid selector; both come back wrapped
-// in an error quoting the input.
+// Only a *bare* stream selector is accepted. A pipeline parses as LogQL but is
+// rejected, because Config.QueryFilter is a matcher slice and every stage
+// after the selector would be dropped on the way there: enforcing
+// `{namespace="prod"} |= "error"` as `{namespace="prod"}` is a silent
+// weakening of a containment control, so ParseFilter fails closed instead
+// (FINDINGS.md §15). A metric query such as `rate({job="api"}[5m])` is
+// rejected with "only log selector is supported", as is any syntactically
+// invalid selector; every rejection comes back wrapped in an error quoting the
+// input.
 func ParseFilter(filter string) ([]*labels.Matcher, error) {
 	filter = strings.TrimSpace(filter)
 	if filter == "" {
@@ -34,7 +37,29 @@ func ParseFilter(filter string) ([]*labels.Matcher, error) {
 		return nil, fmt.Errorf("invalid LogQL stream selector %q: %w", filter, err)
 	}
 
-	return expr.Matchers(), nil
+	// Fail closed: anything richer than a bare stream selector would lose its
+	// pipeline between here and the matcher slice Config holds.
+	selector, ok := expr.(*syntax.MatchersExpr)
+	if !ok {
+		return nil, fmt.Errorf(
+			"invalid LogQL stream selector %q: only bare stream selectors are supported, but %q cannot be enforced and would be silently discarded",
+			filter, discardedStages(expr),
+		)
+	}
+
+	return selector.Mts, nil
+}
+
+// discardedStages renders the part of a parsed log selector that ParseFilter
+// cannot carry into Config.QueryFilter, for the error it returns. A
+// *syntax.PipelineExpr keeps its stages in MultiStages, so those render on
+// their own; any other non-matchers shape falls back to the whole expression,
+// which still points the operator at what they wrote.
+func discardedStages(expr syntax.LogSelectorExpr) string {
+	if pipeline, ok := expr.(*syntax.PipelineExpr); ok {
+		return pipeline.MultiStages.String()
+	}
+	return expr.String()
 }
 
 // MergeQueryWithFilter returns query with filterMatchers prepended to the
