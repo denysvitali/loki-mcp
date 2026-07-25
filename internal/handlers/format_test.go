@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/grafana/loki/v3/pkg/loghttp"
+	"github.com/prometheus/prometheus/model/labels"
 )
 
 const unsupportedFormatErr = "unsupported format: xml. Supported formats: raw, json, text"
@@ -222,15 +224,132 @@ func TestFormatLokiResults_EmptyStreams(t *testing.T) {
 		}
 	})
 
-	t.Run("with warnings raw still reports no logs", func(t *testing.T) {
+	// Inverted expectation: an empty result used to swallow the warnings too.
+	t.Run("with warnings raw reports no logs and the warnings", func(t *testing.T) {
 		t.Parallel()
 
 		got, err := formatLokiResults(empty("1 line omitted due to detected secrets"), "raw")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if want := "No logs found matching the query"; got != want {
+		want := "No logs found matching the query\n\n" +
+			"Warnings:\n" +
+			"  - loki-mcp: 1 line omitted due to detected secrets\n"
+		if got != want {
 			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+}
+
+// TestFormatLokiResults_WarningsBlock pins the trailing warnings block that
+// raw and text render. Before FINDINGS.md §12 both formats dropped
+// result.Warnings on the floor, so an upstream Loki warning never reached a
+// non-JSON client.
+func TestFormatLokiResults_WarningsBlock(t *testing.T) {
+	t.Parallel()
+
+	withWarnings := func(warnings ...string) *loghttp.QueryResponse {
+		r := streamsResponse()
+		r.Warnings = warnings
+		return r
+	}
+
+	tests := []struct {
+		name     string
+		format   string
+		warnings []string
+		want     string
+	}{
+		{
+			name:   "raw without warnings is unchanged",
+			format: "raw",
+			want:   "2024-01-15T10:30:45Z {job=\"test-job\"} hello\n",
+		},
+		{
+			name:     "raw appends one blank line then the block",
+			format:   "raw",
+			warnings: []string{"a genuine warning from Loki"},
+			want: "2024-01-15T10:30:45Z {job=\"test-job\"} hello\n\n" +
+				"Warnings:\n" +
+				"  - a genuine warning from Loki\n",
+		},
+		{
+			name:   "text without warnings is unchanged",
+			format: "text",
+			want:   "Found 1 streams:\n\nStream {job=\"test-job\"} 1:\n[2024-01-15T10:30:45Z] hello\n\n",
+		},
+		{
+			name:     "text reuses the blank line it already ends with",
+			format:   "text",
+			warnings: []string{"a genuine warning from Loki", "and another"},
+			want: "Found 1 streams:\n\nStream {job=\"test-job\"} 1:\n[2024-01-15T10:30:45Z] hello\n\n" +
+				"Warnings:\n" +
+				"  - a genuine warning from Loki\n" +
+				"  - and another\n",
+		},
+		{
+			name:     "the tool's own note is tagged, Loki's is not",
+			format:   "raw",
+			warnings: []string{"a genuine warning from Loki", "3 lines omitted due to detected secrets"},
+			want: "2024-01-15T10:30:45Z {job=\"test-job\"} hello\n\n" +
+				"Warnings:\n" +
+				"  - a genuine warning from Loki\n" +
+				"  - loki-mcp: 3 lines omitted due to detected secrets\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := formatLokiResults(withWarnings(tt.warnings...), tt.format)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("formatLokiResults(%q) =\n%q\nwant\n%q", tt.format, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTagInternalWarnings pins which warnings get the loki-mcp: prefix. Only
+// the notes this server produces with formatSecretOmissionNote do; anything
+// Loki sent passes through byte for byte, including near-misses.
+func TestTagInternalWarnings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"1 line omitted due to detected secrets", "loki-mcp: 1 line omitted due to detected secrets"},
+		{"12 lines omitted due to detected secrets", "loki-mcp: 12 lines omitted due to detected secrets"},
+		{"a genuine warning from Loki", "a genuine warning from Loki"},
+		{"", ""},
+		// Near-misses: the count and the plural must both match the note.
+		{"1 lines omitted due to detected secrets", "1 lines omitted due to detected secrets"},
+		{"2 line omitted due to detected secrets", "2 line omitted due to detected secrets"},
+		{"0 lines omitted due to detected secrets", "0 lines omitted due to detected secrets"},
+		{"1 line omitted due to detected secrets (from Loki)", "1 line omitted due to detected secrets (from Loki)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+
+			got := tagInternalWarnings([]string{tt.in})
+			if len(got) != 1 || got[0] != tt.want {
+				t.Errorf("tagInternalWarnings(%q) = %q, want [%q]", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("empty input yields nil so the JSON field is omitted", func(t *testing.T) {
+		t.Parallel()
+
+		if got := tagInternalWarnings(nil); got != nil {
+			t.Errorf("tagInternalWarnings(nil) = %q, want nil", got)
 		}
 	})
 }
@@ -354,6 +473,170 @@ func TestFormatLokiResults_JSONIndent(t *testing.T) {
 	}
 	if !strings.Contains(got, "\n  \"status\": \"success\"") {
 		t.Errorf("expected two-space indented JSON, got:\n%s", got)
+	}
+}
+
+// TestFormatLokiResults_JSONWireShape pins the json output byte for byte. The
+// shape is Loki's own query-range response: entries are ["<unix-nanos>",
+// "<line>"] tuples, not Go structs, and the never-recomputed "stats" block is
+// dropped.
+func TestFormatLokiResults_JSONWireShape(t *testing.T) {
+	t.Parallel()
+
+	got, err := formatLokiResults(streamsResponse(), "json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{
+  "status": "success",
+  "data": {
+    "resultType": "streams",
+    "result": [
+      {
+        "stream": {
+          "job": "test-job"
+        },
+        "values": [
+          [
+            "1705314645000000000",
+            "hello"
+          ]
+        ]
+      }
+    ]
+  }
+}`
+	if got != want {
+		t.Errorf("formatLokiResults(json) =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestFormatLokiResults_JSONRoundTrip proves the json output parses back
+// through the Loki client's own decoder with every stream, label, timestamp and
+// line intact. Re-marshalling the loghttp structs directly does not: they
+// define UnmarshalJSON but no MarshalJSON (FINDINGS.md §6).
+func TestFormatLokiResults_JSONRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	metadata := labels.FromStrings("trace_id", "0242ac120002")
+	parsed := labels.FromStrings("msg", "text")
+
+	original := &loghttp.QueryResponse{
+		Status:   "success",
+		Warnings: []string{"a genuine warning from Loki"},
+		Data: loghttp.QueryResponseData{
+			ResultType: loghttp.ResultTypeStream,
+			Result: loghttp.Streams{
+				{
+					Labels: loghttp.LabelSet{"job": "api", "level": "info"},
+					Entries: []loghttp.Entry{
+						{Timestamp: time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC), Line: "one"},
+						{
+							Timestamp:          time.Date(2024, 1, 15, 10, 0, 1, 500, time.UTC),
+							Line:               "two \"quoted\" and\nnewlined",
+							StructuredMetadata: metadata,
+							Parsed:             parsed,
+						},
+					},
+				},
+				{Labels: loghttp.LabelSet{"job": "web"}, Entries: []loghttp.Entry{}},
+			},
+		},
+	}
+
+	encoded, err := formatLokiResults(original, "json")
+	if err != nil {
+		t.Fatalf("formatLokiResults(json) unexpected error: %v", err)
+	}
+
+	var decoded loghttp.QueryResponse
+	if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("round trip failed: %v\noutput was:\n%s", err, encoded)
+	}
+
+	assertRoundTripped(t, original, &decoded)
+}
+
+// assertRoundTripped compares a decoded response against the one that was
+// encoded, field by field, so a mismatch names what was lost.
+func assertRoundTripped(t *testing.T, want, got *loghttp.QueryResponse) {
+	t.Helper()
+
+	if got.Status != want.Status {
+		t.Errorf("status = %q, want %q", got.Status, want.Status)
+	}
+	if got.Data.ResultType != want.Data.ResultType {
+		t.Errorf("resultType = %q, want %q", got.Data.ResultType, want.Data.ResultType)
+	}
+	if len(got.Warnings) != len(want.Warnings) || (len(want.Warnings) > 0 && got.Warnings[0] != want.Warnings[0]) {
+		t.Errorf("warnings = %q, want %q", got.Warnings, want.Warnings)
+	}
+
+	wantStreams := want.Data.Result.(loghttp.Streams)
+	gotStreams, ok := got.Data.Result.(loghttp.Streams)
+	if !ok {
+		t.Fatalf("decoded result type = %T, want loghttp.Streams", got.Data.Result)
+	}
+	if len(gotStreams) != len(wantStreams) {
+		t.Fatalf("decoded %d streams, want %d", len(gotStreams), len(wantStreams))
+	}
+
+	for i, wantStream := range wantStreams {
+		gotStream := gotStreams[i]
+		if gotStream.Labels.String() != wantStream.Labels.String() {
+			t.Errorf("stream %d labels = %s, want %s", i, gotStream.Labels, wantStream.Labels)
+		}
+		if len(gotStream.Entries) != len(wantStream.Entries) {
+			t.Errorf("stream %d has %d entries, want %d", i, len(gotStream.Entries), len(wantStream.Entries))
+			continue
+		}
+		for j, wantEntry := range wantStream.Entries {
+			assertEntryRoundTripped(t, i, j, wantEntry, gotStream.Entries[j])
+		}
+	}
+}
+
+// assertEntryRoundTripped compares one decoded entry against the encoded one.
+func assertEntryRoundTripped(t *testing.T, stream, index int, want, got loghttp.Entry) {
+	t.Helper()
+
+	if !got.Timestamp.Equal(want.Timestamp) {
+		t.Errorf("stream %d entry %d timestamp = %s, want %s", stream, index, got.Timestamp, want.Timestamp)
+	}
+	if got.Line != want.Line {
+		t.Errorf("stream %d entry %d line = %q, want %q", stream, index, got.Line, want.Line)
+	}
+	if gotMeta, wantMeta := got.StructuredMetadata.String(), want.StructuredMetadata.String(); gotMeta != wantMeta {
+		t.Errorf("stream %d entry %d structured metadata = %s, want %s", stream, index, gotMeta, wantMeta)
+	}
+	if gotParsed, wantParsed := got.Parsed.String(), want.Parsed.String(); gotParsed != wantParsed {
+		t.Errorf("stream %d entry %d parsed labels = %s, want %s", stream, index, gotParsed, wantParsed)
+	}
+}
+
+// TestFormatLokiResults_JSONEmptyStreamValues pins that a stream with no
+// entries marshals as [] rather than the null the loghttp structs produced.
+func TestFormatLokiResults_JSONEmptyStreamValues(t *testing.T) {
+	t.Parallel()
+
+	result := &loghttp.QueryResponse{
+		Status: "success",
+		Data: loghttp.QueryResponseData{
+			ResultType: loghttp.ResultTypeStream,
+			Result:     loghttp.Streams{{Labels: loghttp.LabelSet{"job": "api"}}},
+		},
+	}
+
+	got, err := formatLokiResults(result, "json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, `"values": []`) {
+		t.Errorf("expected an empty values array, got:\n%s", got)
+	}
+	if strings.Contains(got, "null") {
+		t.Errorf("expected no nulls in the wire output, got:\n%s", got)
 	}
 }
 
@@ -487,8 +770,10 @@ func TestFormatLokiResults_EmptyJSONWithWarnings(t *testing.T) {
 	if !strings.Contains(output, `"warnings"`) {
 		t.Errorf("Expected output to contain warnings, got:\n%s", output)
 	}
-	if !strings.Contains(output, "detected secrets") {
-		t.Errorf("Expected output to contain secret omission note, got:\n%s", output)
+	// Inverted expectation: the note now carries the loki-mcp: tag that tells
+	// a JSON client it came from this server and not from Loki.
+	if !strings.Contains(output, "loki-mcp: 1 line omitted due to detected secrets") {
+		t.Errorf("Expected output to contain the tagged secret omission note, got:\n%s", output)
 	}
 }
 
