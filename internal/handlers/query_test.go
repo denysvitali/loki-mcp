@@ -501,3 +501,28 @@ func TestHandleLokiQuery_SecretFiltering(t *testing.T) {
 		}
 	})
 }
+
+// TestHandleLokiQuery_HeadTailMutuallyExclusive tests that head and tail cannot be used together
+func TestHandleLokiQuery_HeadTailMutuallyExclusive(t *testing.T) {
+	// Create a request with both head and tail set
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "loki_query",
+			Arguments: map[string]any{
+				"query": `{job="test"}`,
+				"head":  float64(5),
+				"tail":  float64(5),
+			},
+		},
+	}
+
+	_, err := HandleLokiQuery(context.Background(), request)
+
+	if err == nil {
+		t.Error("Expected error when both head and tail are specified")
+	}
+
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("Expected error about mutual exclusivity, got: %s", err.Error())
+	}
+}
