@@ -1,0 +1,56 @@
+{
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true
+  },
+  "description": "Get all values for a specific label from Grafana Loki",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "end": {
+        "description": "End time for the query (default: now)",
+        "type": "string"
+      },
+      "format": {
+        "default": "raw",
+        "description": "Output format: raw, json, or text (default: raw)",
+        "type": "string"
+      },
+      "label": {
+        "description": "Label name to get values for",
+        "type": "string"
+      },
+      "org": {
+        "description": "Organization ID for the query (env: LOKI_ORG_ID)",
+        "type": "string"
+      },
+      "password": {
+        "description": "Password for basic authentication (env: LOKI_PASSWORD)",
+        "type": "string"
+      },
+      "start": {
+        "description": "Start time for the query (default: 1h ago)",
+        "type": "string"
+      },
+      "token": {
+        "description": "Bearer token for authentication (env: LOKI_TOKEN)",
+        "type": "string"
+      },
+      "url": {
+        "default": "http://loki.example:3100",
+        "description": "Loki server URL (env: LOKI_URL)",
+        "type": "string"
+      },
+      "username": {
+        "description": "Username for basic authentication (env: LOKI_USERNAME)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "label"
+    ]
+  },
+  "name": "loki_label_values"
+}
