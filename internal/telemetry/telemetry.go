@@ -64,74 +64,32 @@ func Initialize(ctx context.Context, cfg Config) error {
 	var shutdownFns []func(context.Context) error
 	var errs []error
 
-	tracerOptions := []sdktrace.TracerProviderOption{sdktrace.WithResource(res)}
-	if shouldUseOTLP("OTEL_TRACES_EXPORTER", "TRACES") {
-		exp, err := autoexport.NewSpanExporter(ctx)
-		if err != nil {
-			errs = append(errs, err)
-		} else if !autoexport.IsNoneSpanExporter(exp) {
-			tracerOptions = append(tracerOptions, sdktrace.WithBatcher(exp))
-		}
+	tracerProvider, err := newTracerProvider(ctx, res, cfg)
+	if err != nil {
+		errs = append(errs, err)
 	}
-	if cfg.Stderr {
-		exp, err := stdouttrace.New(stdouttrace.WithWriter(os.Stderr))
-		if err != nil {
-			errs = append(errs, err)
-		} else {
-			tracerOptions = append(tracerOptions, sdktrace.WithBatcher(exp))
-		}
-	}
-	if len(tracerOptions) > 1 {
-		provider := sdktrace.NewTracerProvider(tracerOptions...)
-		otel.SetTracerProvider(provider)
-		shutdownFns = append(shutdownFns, provider.Shutdown)
+	if tracerProvider != nil {
+		otel.SetTracerProvider(tracerProvider)
+		shutdownFns = append(shutdownFns, tracerProvider.Shutdown)
 	}
 
-	meterOptions := []sdkmetric.Option{sdkmetric.WithResource(res)}
-	if shouldUseOTLP("OTEL_METRICS_EXPORTER", "METRICS") {
-		reader, err := autoexport.NewMetricReader(ctx)
-		if err != nil {
-			errs = append(errs, err)
-		} else if !autoexport.IsNoneMetricReader(reader) {
-			meterOptions = append(meterOptions, sdkmetric.WithReader(reader))
-		}
+	meterProvider, err := newMeterProvider(ctx, res, cfg)
+	if err != nil {
+		errs = append(errs, err)
 	}
-	if cfg.Stderr {
-		exp, err := stdoutmetric.New(stdoutmetric.WithWriter(os.Stderr))
-		if err != nil {
-			errs = append(errs, err)
-		} else {
-			meterOptions = append(meterOptions, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)))
-		}
-	}
-	if len(meterOptions) > 1 {
-		provider := sdkmetric.NewMeterProvider(meterOptions...)
-		otel.SetMeterProvider(provider)
-		shutdownFns = append(shutdownFns, provider.Shutdown)
+	if meterProvider != nil {
+		otel.SetMeterProvider(meterProvider)
+		shutdownFns = append(shutdownFns, meterProvider.Shutdown)
 		initInstruments()
 	}
 
-	logOptions := []sdklog.LoggerProviderOption{sdklog.WithResource(res)}
-	if shouldUseOTLP("OTEL_LOGS_EXPORTER", "LOGS") {
-		exp, err := autoexport.NewLogExporter(ctx)
-		if err != nil {
-			errs = append(errs, err)
-		} else if !autoexport.IsNoneLogExporter(exp) {
-			logOptions = append(logOptions, sdklog.WithProcessor(sdklog.NewBatchProcessor(exp)))
-		}
+	loggerProvider, err := newLoggerProvider(ctx, res, cfg)
+	if err != nil {
+		errs = append(errs, err)
 	}
-	if cfg.Stderr {
-		exp, err := stdoutlog.New(stdoutlog.WithWriter(os.Stderr))
-		if err != nil {
-			errs = append(errs, err)
-		} else {
-			logOptions = append(logOptions, sdklog.WithProcessor(sdklog.NewBatchProcessor(exp)))
-		}
-	}
-	if len(logOptions) > 1 {
-		provider := sdklog.NewLoggerProvider(logOptions...)
-		global.SetLoggerProvider(provider)
-		shutdownFns = append(shutdownFns, provider.Shutdown)
+	if loggerProvider != nil {
+		global.SetLoggerProvider(loggerProvider)
+		shutdownFns = append(shutdownFns, loggerProvider.Shutdown)
 	}
 
 	shutdownMu.Lock()
@@ -139,6 +97,94 @@ func Initialize(ctx context.Context, cfg Config) error {
 	shutdownMu.Unlock()
 
 	return errors.Join(errs...)
+}
+
+// newTracerProvider builds a TracerProvider from the configured span
+// exporters: OTLP when the OTEL environment asks for it, plus stderr when
+// cfg.Stderr is set. It returns (nil, nil) when no exporter is configured.
+// Exporter construction errors are reported but do not suppress a provider
+// built from the remaining exporters.
+func newTracerProvider(ctx context.Context, res *resource.Resource, cfg Config) (*sdktrace.TracerProvider, error) {
+	options := []sdktrace.TracerProviderOption{sdktrace.WithResource(res)}
+	var errs []error
+
+	if shouldUseOTLP("OTEL_TRACES_EXPORTER", "TRACES") {
+		exp, err := autoexport.NewSpanExporter(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		} else if !autoexport.IsNoneSpanExporter(exp) {
+			options = append(options, sdktrace.WithBatcher(exp))
+		}
+	}
+	if cfg.Stderr {
+		exp, err := stdouttrace.New(stdouttrace.WithWriter(os.Stderr))
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			options = append(options, sdktrace.WithBatcher(exp))
+		}
+	}
+
+	if len(options) == 1 {
+		return nil, errors.Join(errs...)
+	}
+	return sdktrace.NewTracerProvider(options...), errors.Join(errs...)
+}
+
+// newMeterProvider is the metric-reader analogue of newTracerProvider.
+func newMeterProvider(ctx context.Context, res *resource.Resource, cfg Config) (*sdkmetric.MeterProvider, error) {
+	options := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	var errs []error
+
+	if shouldUseOTLP("OTEL_METRICS_EXPORTER", "METRICS") {
+		reader, err := autoexport.NewMetricReader(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		} else if !autoexport.IsNoneMetricReader(reader) {
+			options = append(options, sdkmetric.WithReader(reader))
+		}
+	}
+	if cfg.Stderr {
+		exp, err := stdoutmetric.New(stdoutmetric.WithWriter(os.Stderr))
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			options = append(options, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)))
+		}
+	}
+
+	if len(options) == 1 {
+		return nil, errors.Join(errs...)
+	}
+	return sdkmetric.NewMeterProvider(options...), errors.Join(errs...)
+}
+
+// newLoggerProvider is the log-exporter analogue of newTracerProvider.
+func newLoggerProvider(ctx context.Context, res *resource.Resource, cfg Config) (*sdklog.LoggerProvider, error) {
+	options := []sdklog.LoggerProviderOption{sdklog.WithResource(res)}
+	var errs []error
+
+	if shouldUseOTLP("OTEL_LOGS_EXPORTER", "LOGS") {
+		exp, err := autoexport.NewLogExporter(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		} else if !autoexport.IsNoneLogExporter(exp) {
+			options = append(options, sdklog.WithProcessor(sdklog.NewBatchProcessor(exp)))
+		}
+	}
+	if cfg.Stderr {
+		exp, err := stdoutlog.New(stdoutlog.WithWriter(os.Stderr))
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			options = append(options, sdklog.WithProcessor(sdklog.NewBatchProcessor(exp)))
+		}
+	}
+
+	if len(options) == 1 {
+		return nil, errors.Join(errs...)
+	}
+	return sdklog.NewLoggerProvider(options...), errors.Join(errs...)
 }
 
 // NewLogrusHook bridges logrus records into the configured OpenTelemetry logger.
