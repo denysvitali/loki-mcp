@@ -70,7 +70,7 @@ func NewLokiHTTPClient(params *LokiParams) *LokiHTTPClient {
 // will not parse are likewise errors. On success the returned pointer is
 // always non-nil, though its Data may be empty.
 func (c *LokiHTTPClient) ListLabelNamesWithQuery(ctx context.Context, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
-	return c.fetchLabels(ctx, "/loki/api/v1/labels", query, start, end)
+	return c.fetchLabels(ctx, "/loki/api/v1/labels", "", query, start, end)
 }
 
 // ListLabelValuesWithQuery GETs /loki/api/v1/label/<name>/values for a single
@@ -78,26 +78,31 @@ func (c *LokiHTTPClient) ListLabelNamesWithQuery(ctx context.Context, query stri
 // selector, nanosecond timestamps, and non-200 responses turned into errors
 // carrying the status and the body.
 //
-// labelName is interpolated raw and escaped exactly once, by url.URL.String
-// when the request URL is rendered: url.URL.Path holds the *decoded* path, so
-// pre-escaping it here would encode it twice (FINDINGS.md §10). A "/" in a
-// label name is therefore sent as a path separator rather than %2F; real Loki
-// label names are [a-zA-Z_][a-zA-Z0-9_]*, so nothing that needs escaping
-// normally gets here.
+// labelName is escaped exactly once. url.URL.Path holds the decoded path and
+// url.URL.RawPath its encoded form, so the name is passed decoded in one and
+// percent-encoded in the other: a label containing "/" goes out as %2F, one
+// path segment, rather than as a path separator or as the double-encoded
+// %252F this used to send.
 func (c *LokiHTTPClient) ListLabelValuesWithQuery(ctx context.Context, labelName, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
-	path := fmt.Sprintf("/loki/api/v1/label/%s/values", labelName)
-	return c.fetchLabels(ctx, path, query, start, end)
+	const format = "/loki/api/v1/label/%s/values"
+	path := fmt.Sprintf(format, labelName)
+	rawPath := fmt.Sprintf(format, url.PathEscape(labelName))
+	return c.fetchLabels(ctx, path, rawPath, query, start, end)
 }
 
 // fetchLabels GETs a Loki label endpoint and decodes the LabelResponse. query is
 // the optional stream selector used to restrict the result; it is omitted when
-// empty.
-func (c *LokiHTTPClient) fetchLabels(ctx context.Context, path, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
+// empty. path is the decoded request path and rawPath its percent-encoded form,
+// which callers pass only when the two differ.
+func (c *LokiHTTPClient) fetchLabels(ctx context.Context, path, rawPath, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
 	u, err := url.Parse(c.baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 	u.Path = path
+	if rawPath != path {
+		u.RawPath = rawPath
+	}
 
 	q := u.Query()
 	q.Set("start", fmt.Sprintf("%d", start.UnixNano()))

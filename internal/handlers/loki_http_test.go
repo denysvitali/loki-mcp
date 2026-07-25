@@ -78,20 +78,17 @@ func TestLokiHTTPClient_Paths(t *testing.T) {
 			wantRawPath: "/loki/api/v1/label/job/values",
 		},
 		{
-			// The label name is interpolated raw and escaped exactly once, by
-			// url.URL.String. The server therefore decodes the literal label
-			// name back out. Previously this asserted the double-escaped
-			// "/loki/api/v1/label/we%2Fird%20name/values" (FINDINGS.md §10).
-			//
-			// "/" is a path separator in url.URL.Path, so it is not escaped;
-			// only the space is. Loki label names are [a-zA-Z_][a-zA-Z0-9_]*,
-			// so neither character reaches here in practice.
+			// The label name is escaped exactly once and stays a single path
+			// segment: "/" goes out as %2F, so the server decodes the literal
+			// name back out. This previously sent the double-escaped
+			// "we%252Fird%2520name", and briefly the unescaped "we/ird name",
+			// which Loki would have read as two path segments.
 			name: "label values escapes the label name exactly once",
 			call: func(c *LokiHTTPClient) (*loghttp.LabelResponse, error) {
 				return c.ListLabelValuesWithQuery(context.Background(), "we/ird name", "", testStart, testEnd)
 			},
 			wantPath:    "/loki/api/v1/label/we/ird name/values",
-			wantRawPath: "/loki/api/v1/label/we/ird%20name/values",
+			wantRawPath: "/loki/api/v1/label/we%2Fird%20name/values",
 		},
 	}
 
