@@ -22,15 +22,6 @@ type HTTPConfig struct {
 	DisableSSE bool
 }
 
-// DefaultHTTPConfig returns the default HTTP configuration
-func DefaultHTTPConfig() HTTPConfig {
-	return HTTPConfig{
-		Host:       "0.0.0.0",
-		Port:       "8080",
-		DisableSSE: false,
-	}
-}
-
 const defaultShutdownTimeout = 5 * time.Second
 
 // RunHTTP starts the MCP server in HTTP mode
