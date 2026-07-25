@@ -18,10 +18,15 @@ go build -o loki-mcp .        # or: make build
 
 Requires Go 1.26.4 or newer (see `go.mod`).
 
-`go install github.com/kaiko-ai/loki-mcp@latest` does **not** work: `go.mod`
-carries a `replace` directive (`github.com/hashicorp/memberlist` →
-`github.com/grafana/memberlist`), which `go install` refuses. Build from source
-or use a release binary instead.
+`go install github.com/kaiko-ai/loki-mcp@latest` does **not** work, and this is
+an accepted constraint rather than an open bug — see
+[ADR 0004](docs/adr/0004-go-install-is-unsupported.md). In short: `--query-filter`
+is enforced by parsing LogQL with `github.com/grafana/loki/v3/pkg/logql/syntax`,
+that package transitively pulls in `github.com/grafana/dskit/kv/memberlist`,
+which needs Grafana's memberlist fork, which is only reachable through a
+`replace` directive — and `go install pkg@version` refuses any module whose
+`go.mod` contains one. Clone and `go build`, or take a release binary or the
+container image.
 
 ### Release binary
 
@@ -30,18 +35,25 @@ goreleaser on the [Releases page](https://github.com/kaiko-ai/loki-mcp/releases)
 
 ## Running the server
 
-The binary does nothing useful without a subcommand — bare `loki-mcp` prints
-help and exits 0.
+Bare `loki-mcp` with no subcommand **serves stdio**: it is the same command as
+`loki-mcp stdio`, not a help dump. An MCP client config that passes no
+arguments therefore gets a working server.
 
 | Command | What it does |
 |---|---|
+| `loki-mcp` | Same as `loki-mcp stdio`. |
 | `loki-mcp stdio` | Serves MCP over stdin/stdout. All logs go to stderr. Use this for Claude Desktop, Claude Code and Cursor. |
 | `loki-mcp http` | Serves MCP over HTTP on `0.0.0.0:8080` by default. |
 | `loki-mcp version` | Prints `loki-mcp <version>`. |
 
-`stdio`, `http` and `version` all ping Loki (`GET /loki/api/v1/labels`) before
-doing anything and exit 1 if it is unreachable — `version` included, which is a
-known wart.
+Only the commands that serve traffic — the bare invocation, `stdio` and `http` —
+ping Loki (`GET /loki/api/v1/labels`) at startup and exit 1 if it is
+unreachable. `version`, `help`, `completion` and `--help` never touch the
+network and exit 0 with Loki down.
+
+A runtime failure (unreachable Loki, port already in use) prints just
+`Error: …`. The usage block is reserved for command-line mistakes such as an
+unknown flag or subcommand.
 
 ### HTTP endpoints
 
@@ -70,8 +82,8 @@ Runs a LogQL query.
 | `start` | string | no | 1h ago | See time formats below |
 | `end` | string | no | now | See time formats below |
 | `limit` | number | no | 100 | Max entries returned by Loki |
-| `head` | number | no | — | Keep only the first N (oldest) entries. Mutually exclusive with `tail`. |
-| `tail` | number | no | — | Keep only the last N (newest) entries. Mutually exclusive with `head`. |
+| `head` | number | no | — | Keep only the N **oldest** entries. Mutually exclusive with `tail`. |
+| `tail` | number | no | — | Keep only the N **newest** entries. Mutually exclusive with `head`. |
 | `filter` | string | no | — | Keep only lines containing this substring |
 | `filter_case_sensitive` | boolean | no | `false` | Make `filter` case-sensitive |
 | `format` | string | no | `raw` | `raw`, `json` or `text` |
@@ -90,6 +102,39 @@ parameters as `loki_label_names`.
 
 `start` and `end` accept `now`, a negative Go duration (`-1h`, `-30m`),
 RFC3339, `2006-01-02T15:04:05`, `2006-01-02 15:04:05`, or `2006-01-02`.
+
+### Output contract
+
+These hold for `loki_query` in every format, whether or not the secret filter,
+the keyword `filter` or `head`/`tail` removed anything:
+
+- **Newest first.** Entries are sorted by descending timestamp — the same
+  order Loki's `direction=BACKWARD` range query returns — and post-processing
+  preserves it. `head` still selects the N *oldest* entries and `tail` the N
+  *newest*; both then render newest-first.
+- **Stable stream order.** Entries are regrouped into streams sorted by their
+  label-set string, so two identical queries over identical data emit the
+  streams in the same order. Entries sharing a timestamp are tie-broken by line
+  and then by label set, so nothing is left to map iteration order.
+- **`Warnings:` block.** `raw` and `text` end with a trailing
+
+  ```
+  Warnings:
+    - <one per line>
+  ```
+
+  block whenever the response carries warnings, including those Loki itself
+  returned. It is omitted when there are none.
+- **`loki-mcp: ` prefix.** A warning this server produced rather than passed
+  through from Loki is tagged with `loki-mcp: `. The secret-filter note is the
+  only one today, and it is reported exactly once, as a warning, in all three
+  formats: `loki-mcp: 1 line omitted due to detected secrets`.
+- **`format: json` is Loki's own HTTP API shape.** A streams result is emitted
+  as `{"status":…,"warnings":[…],"data":{"resultType":"streams","result":[{"stream":{…},"values":[["<unix-nanos>","<line>"]]}]}}`,
+  so a Loki-aware client can parse it back. `warnings` is omitted when empty,
+  and `stats` is omitted always: post-processing invalidates it and it is not
+  recomputed. Metric queries (matrix/vector/scalar) are the exception — they
+  are marshalled as-is and do not round-trip.
 
 ## Flags and environment variables
 
@@ -116,6 +161,16 @@ Global flags, available on every subcommand. The flag wins over the env var.
 | `-p`, `--port` | `PORT` | `8080` |
 | `--disable-sse` | `LOKI_DISABLE_SSE` | `false` |
 
+The port is the one setting that does not follow the `LOKI_`-prefix rule.
+Precedence, highest first:
+
+1. `--port`, but only when it is actually passed on the command line;
+2. `PORT`, when set to a non-empty value;
+3. `8080`.
+
+**`LOKI_PORT` is not consulted at all.** It is not a supported name; setting it
+has no effect.
+
 Credentials passed as flags are visible in the process list; prefer the
 environment variables, and prefer `LOKI_TOKEN` over username/password.
 
@@ -124,9 +179,10 @@ environment variables, and prefer `LOKI_TOKEN` over username/password.
 ### Secret filter (on by default)
 
 Every returned log line is scanned with the default betterleaks ruleset. A
-matching line is dropped whole and the output gains a note such as
-`1 line omitted due to detected secrets`. Turn it off only for trusted local
-debugging:
+matching line is dropped whole, and the response gains exactly one warning
+saying so — `loki-mcp: 1 line omitted due to detected secrets` — in the
+`Warnings:` block for `raw` and `text` and in the `warnings` array for `json`.
+Turn it off only for trusted local debugging:
 
 ```bash
 loki-mcp stdio --secret-filter=false
@@ -144,7 +200,22 @@ loki-mcp stdio --query-filter='{namespace="prod"}'
 LOKI_QUERY_FILTER='{namespace="prod"}' loki-mcp http
 ```
 
-An unparseable selector is a startup error.
+**Bare stream selectors only.** A value carrying a pipeline is rejected at
+startup, naming the stage that could not be enforced:
+
+```
+$ loki-mcp --query-filter='{a="b"} |= "x"'
+Error: invalid LogQL stream selector "{a=\"b\"} |= \"x\"": only bare stream
+selectors are supported, but "|= \"x\"" cannot be enforced and would be
+silently discarded
+```
+
+The reason is that the filter is stored as a matcher list and injected into the
+client's stream selectors; there is nowhere for a line filter, a parser stage or
+a label-format stage to go. Accepting `{namespace="prod"} |= "error"` would
+therefore enforce only `namespace="prod"` — a silent weakening of a containment
+control — so it fails closed instead. An unparseable selector and a metric
+query (`rate({job="api"}[5m])`) are startup errors for the same reason.
 
 ## OpenTelemetry
 
@@ -160,18 +231,21 @@ loki-mcp stdio --otel-stderr
 
 ## Docker
 
-The image's entrypoint is the bare binary, so the subcommand is the container
-argument:
+The image's entrypoint is the bare binary and its `CMD` is `["http"]`, so it
+serves HTTP with no arguments. Any container argument replaces the `CMD` and
+becomes the subcommand:
 
 ```bash
 docker build -t loki-mcp .
 
+# HTTP mode — the default
+docker run --rm -p 8080:8080 loki-mcp
+
 # stdio mode (needs -i so the client can write to stdin)
 docker run --rm -i loki-mcp stdio
-
-# HTTP mode
-docker run --rm -p 8080:8080 loki-mcp http
 ```
+
+`docker run --rm -p 8080:8080 loki-mcp http` is the same thing spelled out.
 
 ## Local development stack
 
@@ -183,13 +257,12 @@ log-generator container, and a `loki-mcp-server` service publishing `:8080`.
 docker compose up -d
 ```
 
-Caveats, both visible in the compose file:
+The `loki-mcp-server` service needs no `command:`: the image's `CMD ["http"]`
+makes it serve HTTP on the published `:8080`.
 
-- The `loki-mcp-server` service inherits the bare-binary entrypoint with no
-  subcommand, so the container prints help and exits. Add `command: ["http"]`
-  to the service to make it serve.
-- Promtail scrapes `/var/log/*log` from the host under `job=varlogs`. It does
-  not collect the `log-generator` container's output.
+Promtail has two scrape jobs: `job=varlogs` over the host's `/var/log/*log`,
+and `job=docker` over the compose containers' stdout/stderr through the mounted
+Docker socket — which is what carries the `log-generator` output into Loki.
 
 Push test logs into Loki yourself:
 
@@ -261,8 +334,9 @@ Same JSON in `.cursor/mcp.json`:
 
 Restart Cursor afterwards.
 
-`args` must contain `stdio`. With `"args": []` the binary prints help and exits,
-and the client sees a server that never speaks MCP.
+`"args": ["stdio"]` and `"args": []` both work — a bare invocation is the stdio
+command. The examples spell `stdio` out because it is self-documenting: a reader
+of the config can see which transport is in use without knowing the default.
 
 ### n8n
 
@@ -279,7 +353,7 @@ the SSE endpoint `http://your-server:8080/sse` and connect it to an AI Agent nod
 
 ```
 .
-├── main.go              # 13 lines: sets the version string, calls cmd.Execute()
+├── main.go              # 16 lines: sets the version string, calls cmd.Execute()
 ├── cmd/                 # cobra commands: root.go, stdio.go, http.go, version.go
 ├── internal/
 │   ├── handlers/        # MCP tool definitions and all Loki access
@@ -323,4 +397,4 @@ go test -tags=integration ./internal/handlers -timeout 5m   # make test-integrat
 
 ## License
 
-This repository contains no `LICENSE` file.
+MIT — see [`LICENSE`](LICENSE).

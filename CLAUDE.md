@@ -49,9 +49,14 @@ docker compose up -d
 # Loki API at http://localhost:3100
 ```
 
-`docker-compose.yml` also defines a `loki-mcp-server` service, but its image
-(`Dockerfile`, `ENTRYPOINT ["./loki-mcp"]`) runs the binary with no subcommand,
-which prints help and exits immediately, so that container does not stay up.
+`docker-compose.yml` also defines a `loki-mcp-server` service. It needs no
+`command:`: the image is `ENTRYPOINT ["./loki-mcp"]` plus `CMD ["http"]`, so it
+serves HTTP on the published `:8080` out of the box. `docker run -i <image>
+stdio` overrides the `CMD` for the stdio transport.
+
+Promtail scrapes both `/var/log/*log` (`job=varlogs`) and the compose
+containers' stdout/stderr through the Docker socket (`job=docker`), so the
+`log-generator` output reaches Loki.
 
 ## Architecture
 
@@ -63,7 +68,7 @@ A longer overview — request path, dependency direction, concurrency model — 
 
 ### Commands
 
-`main.go` is 13 lines: it sets the version string and calls `cmd.Execute()`.
+`main.go` is 16 lines: it sets the version string and calls `cmd.Execute()`.
 Everything else is a cobra subcommand in `cmd/`:
 
 - `loki-mcp stdio` - serve MCP over stdin/stdout (Claude Desktop and similar)
@@ -71,12 +76,21 @@ Everything else is a cobra subcommand in `cmd/`:
   (legacy SSE, disabled by `--disable-sse`)
 - `loki-mcp version` - print the version and exit
 
-**The bare binary starts nothing**: with no subcommand it prints help and exits 0.
-MCP client configs must pass `["stdio"]` as args.
+**The bare binary serves stdio**: `rootCmd.RunE` is `runStdio`, the same
+function `stdioCmd` uses, so `loki-mcp` and `loki-mcp stdio` are one command.
+MCP client configs work with `"args": ["stdio"]` and with `"args": []`; prefer
+the explicit form in examples so the transport is visible in the config.
 
-`cmd/root.go`'s `PersistentPreRunE` runs before every subcommand: it initializes
-logging, initializes OpenTelemetry, builds the immutable `handlers.Config`, and
-pings Loki. A failed ping aborts the command.
+`cmd/root.go`'s `PersistentPreRunE` runs before every runnable command: it
+initializes logging, initializes OpenTelemetry and builds the immutable
+`handlers.Config`. It deliberately does **not** ping Loki — cobra runs it for
+`version`, `help` and `completion` too, and those must work offline. The
+serving commands (`runStdio` and `http`'s `RunE`) call `pingLoki` from their own
+body instead, and a failed ping aborts them.
+
+`rootCmd` sets `SilenceUsage: true` so a runtime failure prints only
+`Error: …`. A `SetFlagErrorFunc` hook clears it again when flag parsing fails,
+so an unknown flag still gets the usage block.
 
 ### Packages
 
@@ -136,6 +150,13 @@ Every persistent flag is also an env var; `--help` prints the mapping. Names are
 - `PORT` - HTTP server port (default: 8080), `http` only. No `LOKI_` prefix.
 - Standard `OTEL_*` env vars configure OTLP traces, metrics, and logs
 
+Port precedence is hand-rolled in `cmd/http.go`'s `resolvePort`, highest first:
+`--port` when passed on the command line, then a non-empty `PORT`, then `8080`.
+**`LOKI_PORT` is not a source.** The `port` flag is deliberately left unbound
+from viper, because viper's `AutomaticEnv` would resolve the prefixed
+`LOKI_PORT` ahead of `PORT` and the undocumented name would shadow the
+documented one.
+
 ### CLI Flags
 
 Persistent (all subcommands):
@@ -164,14 +185,36 @@ the whole LogQL AST. With filter `{namespace="prod"}`, a client query `{job="api
 becomes `{namespace="prod", job="api"}`, and `sum(rate({job="api"}[5m]))` becomes
 `sum(rate({namespace="prod", job="api"}[5m]))`.
 
+`ParseFilter` accepts **bare stream selectors only** and fails closed on
+anything else, at startup:
+
+```
+Error: invalid LogQL stream selector "{a=\"b\"} |= \"x\"": only bare stream
+selectors are supported, but "|= \"x\"" cannot be enforced and would be
+silently discarded
+```
+
+`Config.QueryFilter` is a `[]*labels.Matcher`, so a pipeline stage has nowhere
+to live; enforcing `{namespace="prod"} |= "error"` as `{namespace="prod"}` alone
+would silently weaken a containment control. Metric queries and unparseable
+input are rejected the same way.
+
 ### Secret Filter
 
 Returned log lines are scanned by betterleaks using its default ruleset. Matching
 lines are dropped entirely. Filtering happens before formatting, so raw, text and
 json all see sanitized data. The note `N line(s) omitted due to detected secrets`
-is added to the response `Warnings` (visible in `format=json`) and, for `raw` and
-`text`, appended to the rendered output. Enabled by default; disable with
-`--secret-filter=false` or `LOKI_SECRET_FILTER=false`.
+is appended to the response's `Warnings` exactly once, and every renderer reads
+it from there — so it appears in the `Warnings:` block for `raw`/`text` and in
+the `warnings` array for `json`, never twice and never in two different
+wordings. Enabled by default; disable with `--secret-filter=false` or
+`LOKI_SECRET_FILTER=false`.
+
+One `*detect.Detector` is built per process, under a `sync.Once` in
+`config.go`. That is deliberate: `(*detect.Detector).Tokenizer()` writes the
+process-global `tiktoken.SetBpeLoader` from a per-detector `Once`, so two
+detectors scanning concurrently race inside the dependency. Tests that build a
+detector must not call `t.Parallel()`.
 
 ### OpenTelemetry
 
@@ -185,10 +228,36 @@ goes to stderr and is bridged into OTel logs when a logger provider is configure
 The `format` parameter accepts `raw` (default), `json`, or `text`. Anything else is
 rejected by `Format.validate` in `internal/handlers/format.go`.
 
+The contract every `loki_query` response honours:
+
+- **Newest first.** `collectAndSortEntries` sorts by descending timestamp,
+  matching the `direction=BACKWARD` range query, and ties are broken by line and
+  then by label set so the order is a function of the input alone.
+  `applyHeadTail` slices that descending list: `head` takes the N oldest (off
+  the end), `tail` the N newest (off the front).
+- **Stable stream order.** `entriesToStreams` regroups through a map, whose
+  iteration order Go randomises, so it sorts the streams by label-set string
+  before returning them.
+- **Warnings.** `raw` and `text` end with a `Warnings:` block rendered by
+  `appendWarnings`, carrying Loki's own warnings as well as this server's;
+  `json` carries them in `warnings`. Warnings this server injected are tagged
+  with the `loki-mcp: ` prefix (`internalWarningPrefix`).
+- **`json` is Loki's wire format.** `format.go`'s `lokiStreamsResponse` DTO
+  exists because `loghttp.QueryResponse` defines `UnmarshalJSON` but no
+  `MarshalJSON`; the DTO round-trips back through the Loki decoder. `stats` is
+  omitted because post-processing invalidates it.
+
 ## Module Path
 
-The module is `github.com/kaiko-ai/loki-mcp`. Binary installs as `loki-mcp`:
+The module is `github.com/kaiko-ai/loki-mcp`.
+
+`go install github.com/kaiko-ai/loki-mcp@latest` does **not** work and is not
+expected to — see `docs/adr/0004-go-install-is-unsupported.md`. `go.mod` needs a
+`replace` for `github.com/hashicorp/memberlist`, dragged in transitively by the
+LogQL parser `--query-filter` depends on, and `go install pkg@version` refuses
+modules with `replace` directives. Distribution is source builds, the release
+binaries and the container image:
 
 ```bash
-go install github.com/kaiko-ai/loki-mcp@latest
+git clone https://github.com/kaiko-ai/loki-mcp.git && cd loki-mcp && go build -o loki-mcp .
 ```
