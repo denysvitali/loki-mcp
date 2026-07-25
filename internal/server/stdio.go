@@ -26,6 +26,8 @@ func RunStdio(version string, cfg handlers.Config) error {
 }
 
 func shutdownTelemetry() {
+	// 5s is a best-effort flush window: long enough for a healthy collector,
+	// short enough not to hang CLI shutdown on an unreachable one.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := telemetry.Shutdown(ctx); err != nil {
