@@ -214,6 +214,12 @@ keyword filter, no head/tail **and** `h.cfg.Detector == nil`. With a detector
 present, `collectAndSortEntries` flattens all streams and re-sorts them
 `Timestamp.Before` — ascending — discarding the direction the query asked for.
 
+Pre-existing at baseline `7441901`: `HandleLokiQuery` gated post-processing on
+the identical condition (`params.Filter != "" || params.Head > 0 ||
+params.Tail > 0 || secretFilteringEnabled()`) and called the same
+`collectAndSortEntries`. The refactor renamed the code, it did not introduce
+the behaviour.
+
 ### Reproduction
 
 ```bash
@@ -292,8 +298,12 @@ output is not reproducible.
 
 `entriesToStreams` regroups entries into a `map[string]*loghttp.Stream` and then
 builds the result slice by ranging over that map. Go randomises map iteration
-order. Because finding 4's post-processing branch is now entered on every query
-by default, the randomisation reaches ordinary users.
+order. Because finding 4's post-processing branch is entered on every query by
+default, the randomisation reaches ordinary users.
+
+Pre-existing at baseline `7441901`: `entriesToStreams` had the same map-ranging
+implementation and the same default-on gate. The refactor moved it from
+`loki.go` to `entries.go` without changing it.
 
 ### Reproduction
 
