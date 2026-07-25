@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,54 +37,25 @@ func NewLokiHTTPClient(params *LokiParams) *LokiHTTPClient {
 }
 
 // ListLabelNamesWithQuery fetches label names from Loki with an optional query filter.
-func (c *LokiHTTPClient) ListLabelNamesWithQuery(query string, start, end time.Time) (*loghttp.LabelResponse, error) {
-	u, err := url.Parse(c.baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid base URL: %w", err)
-	}
-	u.Path = "/loki/api/v1/labels"
-
-	q := u.Query()
-	q.Set("start", fmt.Sprintf("%d", start.UnixNano()))
-	q.Set("end", fmt.Sprintf("%d", end.UnixNano()))
-	if query != "" {
-		q.Set("query", query)
-	}
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequest("GET", u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	c.addAuthHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result loghttp.LabelResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &result, nil
+func (c *LokiHTTPClient) ListLabelNamesWithQuery(ctx context.Context, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
+	return c.fetchLabels(ctx, "/loki/api/v1/labels", query, start, end)
 }
 
 // ListLabelValuesWithQuery fetches values for a specific label with an optional query filter.
-func (c *LokiHTTPClient) ListLabelValuesWithQuery(labelName, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
+func (c *LokiHTTPClient) ListLabelValuesWithQuery(ctx context.Context, labelName, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
+	path := fmt.Sprintf("/loki/api/v1/label/%s/values", url.PathEscape(labelName))
+	return c.fetchLabels(ctx, path, query, start, end)
+}
+
+// fetchLabels GETs a Loki label endpoint and decodes the LabelResponse. query is
+// the optional stream selector used to restrict the result; it is omitted when
+// empty.
+func (c *LokiHTTPClient) fetchLabels(ctx context.Context, path, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
 	u, err := url.Parse(c.baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
-	u.Path = fmt.Sprintf("/loki/api/v1/label/%s/values", url.PathEscape(labelName))
+	u.Path = path
 
 	q := u.Query()
 	q.Set("start", fmt.Sprintf("%d", start.UnixNano()))
@@ -93,7 +65,7 @@ func (c *LokiHTTPClient) ListLabelValuesWithQuery(labelName, query string, start
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequest("GET", u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

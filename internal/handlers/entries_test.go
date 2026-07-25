@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -101,8 +100,11 @@ func TestParseTime(t *testing.T) {
 	}
 }
 
-// TestFilterEntries_CaseInsensitive tests case-insensitive filtering
-func TestFilterEntries_CaseInsensitive(t *testing.T) {
+// TestFilterEntries covers case-insensitive and case-sensitive substring
+// filtering in one table.
+func TestFilterEntries(t *testing.T) {
+	t.Parallel()
+
 	entries := []logEntry{
 		{Timestamp: time.Now(), Line: "ERROR: something failed", Labels: loghttp.LabelSet{"job": "test"}},
 		{Timestamp: time.Now(), Line: "info: everything is fine", Labels: loghttp.LabelSet{"job": "test"}},
@@ -110,46 +112,62 @@ func TestFilterEntries_CaseInsensitive(t *testing.T) {
 		{Timestamp: time.Now(), Line: "error in lowercase", Labels: loghttp.LabelSet{"job": "test"}},
 	}
 
-	// Case-insensitive search for "error"
-	filtered := filterEntries(entries, "error", false)
-
-	if len(filtered) != 2 {
-		t.Errorf("Expected 2 entries matching 'error' (case-insensitive), got %d", len(filtered))
+	tests := []struct {
+		name          string
+		filter        string
+		caseSensitive bool
+		want          []string
+	}{
+		{
+			name:   "case-insensitive matches both cases",
+			filter: "error",
+			want:   []string{"ERROR: something failed", "error in lowercase"},
+		},
+		{
+			name:          "case-sensitive matches only the exact case",
+			filter:        "ERROR",
+			caseSensitive: true,
+			want:          []string{"ERROR: something failed"},
+		},
+		{
+			name:   "no match yields nothing",
+			filter: "no-such-substring",
+		},
+		{
+			name:   "empty filter matches everything",
+			filter: "",
+			want: []string{
+				"ERROR: something failed",
+				"info: everything is fine",
+				"Warning: potential issue",
+				"error in lowercase",
+			},
+		},
 	}
 
-	// Verify both ERROR and error are matched
-	for _, entry := range filtered {
-		lowerLine := strings.ToLower(entry.Line)
-		if !strings.Contains(lowerLine, "error") {
-			t.Errorf("Entry '%s' should not have matched 'error'", entry.Line)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			filtered := filterEntries(entries, tt.filter, tt.caseSensitive)
+
+			if len(filtered) != len(tt.want) {
+				t.Fatalf("got %d entries, want %d", len(filtered), len(tt.want))
+			}
+			for i, entry := range filtered {
+				if entry.Line != tt.want[i] {
+					t.Errorf("entry %d = %q, want %q", i, entry.Line, tt.want[i])
+				}
+			}
+		})
 	}
 }
 
-// TestFilterEntries_CaseSensitive tests case-sensitive filtering
-func TestFilterEntries_CaseSensitive(t *testing.T) {
-	entries := []logEntry{
-		{Timestamp: time.Now(), Line: "ERROR: something failed", Labels: loghttp.LabelSet{"job": "test"}},
-		{Timestamp: time.Now(), Line: "info: everything is fine", Labels: loghttp.LabelSet{"job": "test"}},
-		{Timestamp: time.Now(), Line: "Warning: potential issue", Labels: loghttp.LabelSet{"job": "test"}},
-		{Timestamp: time.Now(), Line: "error in lowercase", Labels: loghttp.LabelSet{"job": "test"}},
-	}
+// TestApplyHeadTail covers head, tail, and the out-of-range cases in one table.
+func TestApplyHeadTail(t *testing.T) {
+	t.Parallel()
 
-	// Case-sensitive search for "ERROR"
-	filtered := filterEntries(entries, "ERROR", true)
-
-	if len(filtered) != 1 {
-		t.Errorf("Expected 1 entry matching 'ERROR' (case-sensitive), got %d", len(filtered))
-	}
-
-	if len(filtered) > 0 && !strings.Contains(filtered[0].Line, "ERROR") {
-		t.Errorf("Expected entry to contain 'ERROR', got '%s'", filtered[0].Line)
-	}
-}
-
-// TestApplyHeadTail_Head tests head functionality
-func TestApplyHeadTail_Head(t *testing.T) {
-	entries := []logEntry{
+	five := []logEntry{
 		{Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Line: "first"},
 		{Timestamp: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Line: "second"},
 		{Timestamp: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Line: "third"},
@@ -157,61 +175,46 @@ func TestApplyHeadTail_Head(t *testing.T) {
 		{Timestamp: time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC), Line: "fifth"},
 	}
 
-	result := applyHeadTail(entries, 3, 0)
-
-	if len(result) != 3 {
-		t.Errorf("Expected 3 entries with head=3, got %d", len(result))
+	tests := []struct {
+		name    string
+		entries []logEntry
+		head    int
+		tail    int
+		want    []string
+	}{
+		{name: "head takes the oldest", entries: five, head: 3, want: []string{"first", "second", "third"}},
+		{name: "tail takes the newest", entries: five, tail: 2, want: []string{"fourth", "fifth"}},
+		{
+			name: "head larger than count returns everything", entries: five, head: 10,
+			want: []string{"first", "second", "third", "fourth", "fifth"},
+		},
+		{
+			name: "tail larger than count returns everything", entries: five, tail: 10,
+			want: []string{"first", "second", "third", "fourth", "fifth"},
+		},
+		{
+			name: "neither head nor tail returns everything", entries: five,
+			want: []string{"first", "second", "third", "fourth", "fifth"},
+		},
+		{name: "empty input", entries: nil, head: 3},
+		{name: "head wins when both are set", entries: five, head: 1, tail: 1, want: []string{"first"}},
 	}
 
-	expected := []string{"first", "second", "third"}
-	for i, entry := range result {
-		if entry.Line != expected[i] {
-			t.Errorf("Entry %d: expected '%s', got '%s'", i, expected[i], entry.Line)
-		}
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-// TestApplyHeadTail_Tail tests tail functionality
-func TestApplyHeadTail_Tail(t *testing.T) {
-	entries := []logEntry{
-		{Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Line: "first"},
-		{Timestamp: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Line: "second"},
-		{Timestamp: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Line: "third"},
-		{Timestamp: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), Line: "fourth"},
-		{Timestamp: time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC), Line: "fifth"},
-	}
+			result := applyHeadTail(tt.entries, tt.head, tt.tail)
 
-	result := applyHeadTail(entries, 0, 2)
-
-	if len(result) != 2 {
-		t.Errorf("Expected 2 entries with tail=2, got %d", len(result))
-	}
-
-	expected := []string{"fourth", "fifth"}
-	for i, entry := range result {
-		if entry.Line != expected[i] {
-			t.Errorf("Entry %d: expected '%s', got '%s'", i, expected[i], entry.Line)
-		}
-	}
-}
-
-// TestApplyHeadTail_LargerThanCount tests head/tail when value exceeds entry count
-func TestApplyHeadTail_LargerThanCount(t *testing.T) {
-	entries := []logEntry{
-		{Timestamp: time.Now(), Line: "first"},
-		{Timestamp: time.Now(), Line: "second"},
-	}
-
-	// Head larger than count
-	result := applyHeadTail(entries, 10, 0)
-	if len(result) != 2 {
-		t.Errorf("Expected all 2 entries when head > count, got %d", len(result))
-	}
-
-	// Tail larger than count
-	result = applyHeadTail(entries, 0, 10)
-	if len(result) != 2 {
-		t.Errorf("Expected all 2 entries when tail > count, got %d", len(result))
+			if len(result) != len(tt.want) {
+				t.Fatalf("got %d entries, want %d", len(result), len(tt.want))
+			}
+			for i, entry := range result {
+				if entry.Line != tt.want[i] {
+					t.Errorf("entry %d = %q, want %q", i, entry.Line, tt.want[i])
+				}
+			}
+		})
 	}
 }
 

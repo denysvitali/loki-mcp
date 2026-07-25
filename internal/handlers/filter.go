@@ -121,6 +121,9 @@ func injectRangeAggregation(e *syntax.RangeAggregationExpr, filterMatchers []*la
 	}, nil
 }
 
+// injectVectorAggregation and injectLogRange below are flagged as clones by
+// dupl. They are not: they rebuild different AST node types from different
+// fields and must be able to change independently.
 func injectVectorAggregation(e *syntax.VectorAggregationExpr, filterMatchers []*labels.Matcher) (syntax.Expr, error) {
 	newLeft, err := injectMatchers(e.Left, filterMatchers)
 	if err != nil {

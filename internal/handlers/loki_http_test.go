@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -58,14 +59,14 @@ func TestLokiHTTPClient_Paths(t *testing.T) {
 		{
 			name: "label names",
 			call: func(c *LokiHTTPClient) (*loghttp.LabelResponse, error) {
-				return c.ListLabelNamesWithQuery("", testStart, testEnd)
+				return c.ListLabelNamesWithQuery(context.Background(), "", testStart, testEnd)
 			},
 			wantPath: "/loki/api/v1/labels",
 		},
 		{
 			name: "label values",
 			call: func(c *LokiHTTPClient) (*loghttp.LabelResponse, error) {
-				return c.ListLabelValuesWithQuery("job", "", testStart, testEnd)
+				return c.ListLabelValuesWithQuery(context.Background(), "job", "", testStart, testEnd)
 			},
 			wantPath: "/loki/api/v1/label/job/values",
 		},
@@ -76,7 +77,7 @@ func TestLokiHTTPClient_Paths(t *testing.T) {
 			// singly-escaped form rather than the literal label name.
 			name: "label values double-escapes the label name",
 			call: func(c *LokiHTTPClient) (*loghttp.LabelResponse, error) {
-				return c.ListLabelValuesWithQuery("we/ird name", "", testStart, testEnd)
+				return c.ListLabelValuesWithQuery(context.Background(), "we/ird name", "", testStart, testEnd)
 			},
 			wantPath: "/loki/api/v1/label/we%2Fird%20name/values",
 		},
@@ -115,7 +116,7 @@ func TestLokiHTTPClient_QueryParams(t *testing.T) {
 		srv, captured := newFakeLoki(t, http.StatusOK, labelResponseBody)
 		c := NewLokiHTTPClient(&LokiParams{URL: srv.URL})
 
-		if _, err := c.ListLabelNamesWithQuery(`{namespace="prod"}`, testStart, testEnd); err != nil {
+		if _, err := c.ListLabelNamesWithQuery(context.Background(), `{namespace="prod"}`, testStart, testEnd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
@@ -136,7 +137,7 @@ func TestLokiHTTPClient_QueryParams(t *testing.T) {
 		srv, captured := newFakeLoki(t, http.StatusOK, labelResponseBody)
 		c := NewLokiHTTPClient(&LokiParams{URL: srv.URL})
 
-		if _, err := c.ListLabelValuesWithQuery("job", "", testStart, testEnd); err != nil {
+		if _, err := c.ListLabelValuesWithQuery(context.Background(), "job", "", testStart, testEnd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
@@ -195,7 +196,7 @@ func TestLokiHTTPClient_AuthHeaders(t *testing.T) {
 			params.URL = srv.URL
 			c := NewLokiHTTPClient(&params)
 
-			if _, err := c.ListLabelNamesWithQuery("", testStart, testEnd); err != nil {
+			if _, err := c.ListLabelNamesWithQuery(context.Background(), "", testStart, testEnd); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -219,7 +220,7 @@ func TestLokiHTTPClient_Errors(t *testing.T) {
 		srv, _ := newFakeLoki(t, http.StatusBadRequest, "bad selector")
 		c := NewLokiHTTPClient(&LokiParams{URL: srv.URL})
 
-		_, err := c.ListLabelNamesWithQuery("", testStart, testEnd)
+		_, err := c.ListLabelNamesWithQuery(context.Background(), "", testStart, testEnd)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -234,7 +235,7 @@ func TestLokiHTTPClient_Errors(t *testing.T) {
 		srv, _ := newFakeLoki(t, http.StatusInternalServerError, "boom")
 		c := NewLokiHTTPClient(&LokiParams{URL: srv.URL})
 
-		_, err := c.ListLabelValuesWithQuery("job", "", testStart, testEnd)
+		_, err := c.ListLabelValuesWithQuery(context.Background(), "job", "", testStart, testEnd)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -249,7 +250,7 @@ func TestLokiHTTPClient_Errors(t *testing.T) {
 		srv, _ := newFakeLoki(t, http.StatusOK, "{not json")
 		c := NewLokiHTTPClient(&LokiParams{URL: srv.URL})
 
-		_, err := c.ListLabelNamesWithQuery("", testStart, testEnd)
+		_, err := c.ListLabelNamesWithQuery(context.Background(), "", testStart, testEnd)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -263,7 +264,7 @@ func TestLokiHTTPClient_Errors(t *testing.T) {
 
 		c := NewLokiHTTPClient(&LokiParams{URL: "http://%zz"})
 
-		_, err := c.ListLabelNamesWithQuery("", testStart, testEnd)
+		_, err := c.ListLabelNamesWithQuery(context.Background(), "", testStart, testEnd)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -281,7 +282,7 @@ func TestLokiHTTPClient_Errors(t *testing.T) {
 
 		c := NewLokiHTTPClient(&LokiParams{URL: addr})
 
-		_, err := c.ListLabelValuesWithQuery("job", "", testStart, testEnd)
+		_, err := c.ListLabelValuesWithQuery(context.Background(), "job", "", testStart, testEnd)
 		if err == nil {
 			t.Fatal("expected error")
 		}
