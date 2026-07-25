@@ -7,26 +7,27 @@ import (
 
 	"github.com/grafana/loki/v3/pkg/loghttp"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/prometheus/prometheus/model/labels"
 )
 
-// labelFetcher queries Loki for a label response. cfg is the active query filter
-// configuration, or nil when queries are unrestricted.
-type labelFetcher func(ctx context.Context, params *LokiParams, cfg *FilterConfig, start, end time.Time) (*loghttp.LabelResponse, error)
+// labelFetcher queries Loki for a label response. filter is the configured query
+// filter, or nil when queries are unrestricted.
+type labelFetcher func(ctx context.Context, params *LokiParams, filter []*labels.Matcher, start, end time.Time) (*loghttp.LabelResponse, error)
 
 // labelFormatter renders a label response using the client's requested format.
 type labelFormatter func(params *LokiParams, result *loghttp.LabelResponse) (string, error)
 
-// HandleLokiLabelNames handles Loki label names tool requests
-func HandleLokiLabelNames(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return runLabelRequest(ctx, request, "labels query execution failed", fetchLabelNames,
+// HandleLabelNames handles loki_label_names tool requests.
+func (h *Handlers) HandleLabelNames(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return h.runLabelRequest(ctx, request, "labels query execution failed", fetchLabelNames,
 		func(params *LokiParams, result *loghttp.LabelResponse) (string, error) {
 			return formatLokiLabelsResults(result, params.Format)
 		})
 }
 
-// HandleLokiLabelValues handles Loki label values tool requests
-func HandleLokiLabelValues(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return runLabelRequest(ctx, request, "label values query execution failed", fetchLabelValues,
+// HandleLabelValues handles loki_label_values tool requests.
+func (h *Handlers) HandleLabelValues(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return h.runLabelRequest(ctx, request, "label values query execution failed", fetchLabelValues,
 		func(params *LokiParams, result *loghttp.LabelResponse) (string, error) {
 			return formatLokiLabelValuesResults(params.Label, result, params.Format)
 		})
@@ -35,7 +36,7 @@ func HandleLokiLabelValues(ctx context.Context, request mcp.CallToolRequest) (*m
 // runLabelRequest is the shared body of both label tools: bind arguments, resolve
 // the time range, fetch and format. The tools differ only in the Loki call, the
 // formatter, and the wording of the fetch failure.
-func runLabelRequest(
+func (h *Handlers) runLabelRequest(
 	ctx context.Context,
 	request mcp.CallToolRequest,
 	fetchErrMsg string,
@@ -53,7 +54,7 @@ func runLabelRequest(
 		return nil, err
 	}
 
-	result, err := fetch(ctx, &params, GetFilterConfig(), start, end)
+	result, err := fetch(ctx, &params, h.cfg.QueryFilter, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", fetchErrMsg, err)
 	}
@@ -68,17 +69,17 @@ func runLabelRequest(
 
 // fetchLabelNames uses the HTTP client when a query filter is configured, because
 // only it can pass the filter selector to Loki; otherwise it uses the SDK client.
-func fetchLabelNames(ctx context.Context, params *LokiParams, cfg *FilterConfig, start, end time.Time) (*loghttp.LabelResponse, error) {
-	if cfg != nil {
-		return NewLokiHTTPClient(params).ListLabelNamesWithQuery(ctx, BuildFilterSelector(cfg.Matchers), start, end)
+func fetchLabelNames(ctx context.Context, params *LokiParams, filter []*labels.Matcher, start, end time.Time) (*loghttp.LabelResponse, error) {
+	if len(filter) > 0 {
+		return NewLokiHTTPClient(params).ListLabelNamesWithQuery(ctx, BuildFilterSelector(filter), start, end)
 	}
 	return newLokiClient(params).ListLabelNames(true, start, end)
 }
 
 // fetchLabelValues is fetchLabelNames for a single label's values.
-func fetchLabelValues(ctx context.Context, params *LokiParams, cfg *FilterConfig, start, end time.Time) (*loghttp.LabelResponse, error) {
-	if cfg != nil {
-		return NewLokiHTTPClient(params).ListLabelValuesWithQuery(ctx, params.Label, BuildFilterSelector(cfg.Matchers), start, end)
+func fetchLabelValues(ctx context.Context, params *LokiParams, filter []*labels.Matcher, start, end time.Time) (*loghttp.LabelResponse, error) {
+	if len(filter) > 0 {
+		return NewLokiHTTPClient(params).ListLabelValuesWithQuery(ctx, params.Label, BuildFilterSelector(filter), start, end)
 	}
 	return newLokiClient(params).ListLabelValues(params.Label, true, start, end)
 }

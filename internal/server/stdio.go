@@ -6,16 +6,17 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/kaiko-ai/loki-mcp/internal/handlers"
 	"github.com/kaiko-ai/loki-mcp/internal/logging"
 	"github.com/kaiko-ai/loki-mcp/internal/telemetry"
 )
 
 // RunStdio starts the MCP server in stdio mode
-func RunStdio(version string) error {
+func RunStdio(version string, cfg handlers.Config) error {
 	logging.Info("Starting MCP server in stdio mode")
 	defer shutdownTelemetry()
 
-	s := New(version)
+	s := New(version, cfg)
 
 	if err := server.ServeStdio(s); err != nil {
 		return err

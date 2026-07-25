@@ -25,7 +25,7 @@ Endpoints:
 			DisableSSE: viper.GetBool("disable-sse"),
 		}
 
-		if err := server.RunHTTP(Version, cfg); err != nil {
+		if err := server.RunHTTP(Version, cfg, handlerConfig); err != nil {
 			logging.Errorf("HTTP server error: %v", err)
 			return err
 		}

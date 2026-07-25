@@ -1,54 +1,54 @@
 package handlers
 
 import (
-	"sync"
+	"fmt"
 
+	"github.com/betterleaks/betterleaks/detect"
 	"github.com/prometheus/prometheus/model/labels"
 )
 
-// FilterConfig holds the global query filter configuration.
-type FilterConfig struct {
-	RawFilter string
-	Matchers  []*labels.Matcher
+// Config is the immutable, process-wide handler configuration built once at
+// startup. Nothing writes to it after NewConfig returns.
+type Config struct {
+	// QueryFilter is ANDed into every client query. nil: queries are unrestricted.
+	QueryFilter []*labels.Matcher
+	// Detector scans returned log lines for secrets. nil: secret filtering disabled.
+	Detector *detect.Detector
 }
 
-var (
-	filterConfig *FilterConfig
-	filterMu     sync.RWMutex
-)
+// NewConfig parses the raw LogQL stream selector and builds the secret detector.
+// An empty rawFilter leaves queries unrestricted; secretFilter=false leaves the
+// detector nil.
+func NewConfig(rawFilter string, secretFilter bool) (Config, error) {
+	var cfg Config
 
-// InitializeFilterConfig parses and stores the global query filter.
-// This should be called once at startup. Returns an error if the filter is invalid.
-func InitializeFilterConfig(filter string) error {
-	if filter == "" {
-		return nil
+	if secretFilter {
+		detector, err := detect.NewDetectorDefaultConfig()
+		if err != nil {
+			return Config{}, fmt.Errorf("initialize secret detector: %w", err)
+		}
+		detector.SkipFindingAppend = true
+		cfg.Detector = detector
 	}
 
-	matchers, err := ParseFilter(filter)
-	if err != nil {
-		return err
+	if rawFilter != "" {
+		matchers, err := ParseFilter(rawFilter)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.QueryFilter = matchers
 	}
 
-	filterMu.Lock()
-	defer filterMu.Unlock()
-	filterConfig = &FilterConfig{
-		RawFilter: filter,
-		Matchers:  matchers,
-	}
-	return nil
+	return cfg, nil
 }
 
-// GetFilterConfig returns the current filter configuration.
-// Returns nil if no filter is configured.
-func GetFilterConfig() *FilterConfig {
-	filterMu.RLock()
-	defer filterMu.RUnlock()
-	return filterConfig
+// Handlers serves the Loki MCP tools. Concurrency: cfg is read-only after
+// construction, so all methods are safe to call from any goroutine.
+type Handlers struct {
+	cfg Config
 }
 
-// ResetFilterConfig clears the filter configuration (for testing).
-func ResetFilterConfig() {
-	filterMu.Lock()
-	defer filterMu.Unlock()
-	filterConfig = nil
+// New returns a handler set bound to cfg.
+func New(cfg Config) *Handlers {
+	return &Handlers{cfg: cfg}
 }

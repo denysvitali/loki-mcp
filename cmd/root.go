@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -60,49 +61,87 @@ Use subcommands to run the server in different modes:
   - stdio: For Claude Desktop and similar MCP clients
   - http:  For web-based clients and n8n`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if err := logging.Init(viper.GetString("log-level"), viper.GetString("log-format")); err != nil {
+		if err := initLogging(); err != nil {
 			return err
 		}
 
-		if err := telemetry.Initialize(cmd.Context(), telemetry.Config{
-			ServiceVersion: Version,
-			Stderr:         viper.GetBool("otel-stderr"),
-		}); err != nil {
-			return fmt.Errorf("failed to initialize OpenTelemetry: %w", err)
-		}
-		logging.AddHook(telemetry.NewLogrusHook(Version))
-
-		if err := handlers.InitializeSecretFilterConfig(viper.GetBool("secret-filter")); err != nil {
+		if err := initTelemetry(cmd.Context()); err != nil {
 			return err
 		}
-		if viper.GetBool("secret-filter") {
-			logging.Info("Secret filtering enabled")
-		} else {
-			logging.Warn("Secret filtering disabled")
-		}
 
-		if queryFilter := viper.GetString("query-filter"); queryFilter != "" {
-			if err := handlers.InitializeFilterConfig(queryFilter); err != nil {
-				return err
-			}
-			logging.Infof("Query filter configured: %s", queryFilter)
+		cfg, err := buildHandlerConfig()
+		if err != nil {
+			return err
 		}
+		handlerConfig = cfg
 
-		// Ping Loki to verify connectivity before starting the server
-		params := &handlers.LokiParams{
-			URL:      viper.GetString("url"),
-			Username: viper.GetString("username"),
-			Password: viper.GetString("password"),
-			Token:    viper.GetString("token"),
-			Org:      viper.GetString("org-id"),
-		}
-		if err := handlers.PingLoki(params); err != nil {
-			return fmt.Errorf("loki connectivity check failed: %w", err)
-		}
-		logging.Infof("Loki reachable at %s", params.URL)
-
-		return nil
+		return pingLoki()
 	},
+}
+
+// handlerConfig is built once in PersistentPreRunE and read by the stdio and
+// http subcommands. Cobra gives no other way to pass state between a persistent
+// pre-run hook and a command's RunE.
+var handlerConfig handlers.Config
+
+// initLogging configures the global logger from the resolved flags.
+func initLogging() error {
+	return logging.Init(viper.GetString("log-level"), viper.GetString("log-format"))
+}
+
+// initTelemetry starts the OpenTelemetry providers and bridges logrus into them.
+func initTelemetry(ctx context.Context) error {
+	if err := telemetry.Initialize(ctx, telemetry.Config{
+		ServiceVersion: Version,
+		Stderr:         viper.GetBool("otel-stderr"),
+	}); err != nil {
+		return fmt.Errorf("failed to initialize OpenTelemetry: %w", err)
+	}
+	logging.AddHook(telemetry.NewLogrusHook(Version))
+	return nil
+}
+
+// buildHandlerConfig assembles the immutable handler configuration and reports
+// what it decided.
+func buildHandlerConfig() (handlers.Config, error) {
+	secretFilter := viper.GetBool("secret-filter")
+	queryFilter := viper.GetString("query-filter")
+
+	cfg, err := handlers.NewConfig(queryFilter, secretFilter)
+
+	// The secret-filter decision is reported before the query filter is
+	// validated, so an invalid --query-filter still logs it before failing.
+	if secretFilter {
+		logging.Info("Secret filtering enabled")
+	} else {
+		logging.Warn("Secret filtering disabled")
+	}
+
+	if err != nil {
+		return handlers.Config{}, err
+	}
+	if queryFilter != "" {
+		logging.Infof("Query filter configured: %s", queryFilter)
+	}
+
+	return cfg, nil
+}
+
+// pingLoki verifies connectivity to Loki before the server starts.
+func pingLoki() error {
+	params := &handlers.LokiParams{
+		URL:      viper.GetString("url"),
+		Username: viper.GetString("username"),
+		Password: viper.GetString("password"),
+		Token:    viper.GetString("token"),
+		Org:      viper.GetString("org-id"),
+	}
+	if err := handlers.PingLoki(params); err != nil {
+		return fmt.Errorf("loki connectivity check failed: %w", err)
+	}
+	logging.Infof("Loki reachable at %s", params.URL)
+
+	return nil
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

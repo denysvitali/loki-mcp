@@ -117,9 +117,9 @@ func TestHandleLokiQuery_Formats(t *testing.T) {
 				args["format"] = tt.format
 			}
 
-			res, err := HandleLokiQuery(context.Background(), queryRequest(args))
+			res, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 			if err != nil {
-				t.Fatalf("HandleLokiQuery returned error: %v", err)
+				t.Fatalf("HandleQuery returned error: %v", err)
 			}
 			if got := resultText(t, res); got != tt.want {
 				t.Errorf("output =\n%q\nwant\n%q", got, tt.want)
@@ -130,9 +130,9 @@ func TestHandleLokiQuery_Formats(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		args := map[string]any{"query": `{job=~".+"}`, "url": srv.URL, "format": "json"}
 
-		res, err := HandleLokiQuery(context.Background(), queryRequest(args))
+		res, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 		if err != nil {
-			t.Fatalf("HandleLokiQuery returned error: %v", err)
+			t.Fatalf("HandleQuery returned error: %v", err)
 		}
 		got := resultText(t, res)
 		if !strings.HasPrefix(got, "{\n  \"status\": \"success\",") {
@@ -146,7 +146,7 @@ func TestHandleLokiQuery_Formats(t *testing.T) {
 	t.Run("unsupported format", func(t *testing.T) {
 		args := map[string]any{"query": `{job=~".+"}`, "url": srv.URL, "format": "xml"}
 
-		_, err := HandleLokiQuery(context.Background(), queryRequest(args))
+		_, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -200,8 +200,8 @@ func TestHandleLokiQuery_RequestParams(t *testing.T) {
 				args[k] = v
 			}
 
-			if _, err := HandleLokiQuery(context.Background(), queryRequest(args)); err != nil {
-				t.Fatalf("HandleLokiQuery returned error: %v", err)
+			if _, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args)); err != nil {
+				t.Fatalf("HandleQuery returned error: %v", err)
 			}
 
 			if got := captured.Get("query"); got != tt.wantQuery {
@@ -228,8 +228,8 @@ func TestHandleLokiQuery_TimeRange(t *testing.T) {
 			"end":   "2024-01-15T10:00:00Z",
 		}
 
-		if _, err := HandleLokiQuery(context.Background(), queryRequest(args)); err != nil {
-			t.Fatalf("HandleLokiQuery returned error: %v", err)
+		if _, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args)); err != nil {
+			t.Fatalf("HandleQuery returned error: %v", err)
 		}
 
 		if got, want := captured.Get("start"), fmt.Sprintf("%d", testStart.UnixNano()); got != want {
@@ -265,7 +265,7 @@ func TestHandleLokiQuery_TimeRange(t *testing.T) {
 				args[k] = v
 			}
 
-			_, err := HandleLokiQuery(context.Background(), queryRequest(args))
+			_, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -331,9 +331,9 @@ func TestHandleLokiQuery_PostProcessing(t *testing.T) {
 				args[k] = v
 			}
 
-			res, err := HandleLokiQuery(context.Background(), queryRequest(args))
+			res, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 			if err != nil {
-				t.Fatalf("HandleLokiQuery returned error: %v", err)
+				t.Fatalf("HandleQuery returned error: %v", err)
 			}
 
 			got := resultText(t, res)
@@ -356,7 +356,7 @@ func TestHandleLokiQuery_HeadTailRejected(t *testing.T) {
 
 	args := map[string]any{"query": `{job="test"}`, "head": float64(5), "tail": float64(5)}
 
-	_, err := HandleLokiQuery(context.Background(), queryRequest(args))
+	_, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -371,7 +371,7 @@ func TestHandleLokiQuery_BindError(t *testing.T) {
 
 	args := map[string]any{"query": float64(42)}
 
-	_, err := HandleLokiQuery(context.Background(), queryRequest(args))
+	_, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -391,7 +391,7 @@ func TestHandleLokiQuery_QueryExecutionError(t *testing.T) {
 
 	args := map[string]any{"query": `{job="api"}`, "url": srv.URL}
 
-	_, err := HandleLokiQuery(context.Background(), queryRequest(args))
+	_, err := newTestHandlers(t).HandleQuery(context.Background(), queryRequest(args))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -402,21 +402,17 @@ func TestHandleLokiQuery_QueryExecutionError(t *testing.T) {
 
 // TestHandleLokiQuery_QueryFilterMerge pins that a configured query filter is
 // ANDed into the client's stream selector before the query is sent.
-// It mutates package-global filter state, so it must stay serial.
 func TestHandleLokiQuery_QueryFilterMerge(t *testing.T) {
-	ResetFilterConfig()
-	t.Cleanup(ResetFilterConfig)
+	t.Parallel()
 
-	if err := InitializeFilterConfig(`{namespace="prod"}`); err != nil {
-		t.Fatalf("InitializeFilterConfig failed: %v", err)
-	}
+	h := New(newTestConfig(t, `{namespace="prod"}`, false))
 
 	t.Run("merged into the client query", func(t *testing.T) {
 		srv, captured := newFakeQueryLoki(t, queryRangeBody)
 		args := map[string]any{"query": `{job="api"}`, "url": srv.URL}
 
-		if _, err := HandleLokiQuery(context.Background(), queryRequest(args)); err != nil {
-			t.Fatalf("HandleLokiQuery returned error: %v", err)
+		if _, err := h.HandleQuery(context.Background(), queryRequest(args)); err != nil {
+			t.Fatalf("HandleQuery returned error: %v", err)
 		}
 
 		if got, want := captured.Get("query"), `{namespace="prod", job="api"}`; got != want {
@@ -428,7 +424,7 @@ func TestHandleLokiQuery_QueryFilterMerge(t *testing.T) {
 		srv, _ := newFakeQueryLoki(t, queryRangeBody)
 		args := map[string]any{"query": "not a logql query", "url": srv.URL}
 
-		_, err := HandleLokiQuery(context.Background(), queryRequest(args))
+		_, err := h.HandleQuery(context.Background(), queryRequest(args))
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -440,7 +436,6 @@ func TestHandleLokiQuery_QueryFilterMerge(t *testing.T) {
 
 // TestHandleLokiQuery_SecretFiltering pins that lines containing secrets are
 // omitted and that the note is appended for non-JSON formats only.
-// It mutates package-global secret filter state, so it must stay serial.
 func TestHandleLokiQuery_SecretFiltering(t *testing.T) {
 	body := `{
   "status": "success",
@@ -459,18 +454,15 @@ func TestHandleLokiQuery_SecretFiltering(t *testing.T) {
   }
 }`
 
-	if err := InitializeSecretFilterConfig(true); err != nil {
-		t.Fatalf("InitializeSecretFilterConfig failed: %v", err)
-	}
-	t.Cleanup(ResetSecretFilterConfig)
+	h := New(newTestConfig(t, "", true))
 
 	t.Run("raw appends the omission note", func(t *testing.T) {
 		srv, _ := newFakeQueryLoki(t, body)
 		args := map[string]any{"query": `{job="api"}`, "url": srv.URL}
 
-		res, err := HandleLokiQuery(context.Background(), queryRequest(args))
+		res, err := h.HandleQuery(context.Background(), queryRequest(args))
 		if err != nil {
-			t.Fatalf("HandleLokiQuery returned error: %v", err)
+			t.Fatalf("HandleQuery returned error: %v", err)
 		}
 
 		want := "2024-01-15T10:00:00Z {job=\"api\"} harmless line\n" +
@@ -484,9 +476,9 @@ func TestHandleLokiQuery_SecretFiltering(t *testing.T) {
 		srv, _ := newFakeQueryLoki(t, body)
 		args := map[string]any{"query": `{job="api"}`, "url": srv.URL, "format": "json"}
 
-		res, err := HandleLokiQuery(context.Background(), queryRequest(args))
+		res, err := h.HandleQuery(context.Background(), queryRequest(args))
 		if err != nil {
-			t.Fatalf("HandleLokiQuery returned error: %v", err)
+			t.Fatalf("HandleQuery returned error: %v", err)
 		}
 
 		got := resultText(t, res)

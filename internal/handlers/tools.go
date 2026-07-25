@@ -5,8 +5,8 @@ import (
 	"github.com/spf13/viper"
 )
 
-// NewLokiQueryTool creates and returns a tool for querying Grafana Loki
-func NewLokiQueryTool() mcp.Tool {
+// QueryTool returns the loki_query tool definition.
+func (h *Handlers) QueryTool() mcp.Tool {
 	lokiURL := viper.GetString("url")
 
 	return mcp.NewTool("loki_query",
@@ -59,8 +59,8 @@ func NewLokiQueryTool() mcp.Tool {
 	)
 }
 
-// NewLokiLabelNamesTool creates and returns a tool for getting all label names from Grafana Loki
-func NewLokiLabelNamesTool() mcp.Tool {
+// LabelNamesTool returns the loki_label_names tool definition.
+func (h *Handlers) LabelNamesTool() mcp.Tool {
 	lokiURL := viper.GetString("url")
 
 	return mcp.NewTool("loki_label_names",
@@ -94,8 +94,8 @@ func NewLokiLabelNamesTool() mcp.Tool {
 	)
 }
 
-// NewLokiLabelValuesTool creates and returns a tool for getting values for a specific label from Grafana Loki
-func NewLokiLabelValuesTool() mcp.Tool {
+// LabelValuesTool returns the loki_label_values tool definition.
+func (h *Handlers) LabelValuesTool() mcp.Tool {
 	lokiURL := viper.GetString("url")
 
 	return mcp.NewTool("loki_label_values",

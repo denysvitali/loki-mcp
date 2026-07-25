@@ -53,7 +53,7 @@ func TestHandleLokiLabelNames(t *testing.T) {
 				args["format"] = tt.format
 			}
 
-			res, err := HandleLokiLabelNames(context.Background(), toolRequest("loki_label_names", args))
+			res, err := newTestHandlers(t).HandleLabelNames(context.Background(), toolRequest("loki_label_names", args))
 			if err != nil {
 				t.Fatalf("HandleLokiLabelNames returned error: %v", err)
 			}
@@ -73,7 +73,7 @@ func TestHandleLokiLabelNames(t *testing.T) {
 		srv, _ := newFakeLabelLoki(t, labelResponseBody)
 		args := map[string]any{"url": srv.URL, "format": "json"}
 
-		res, err := HandleLokiLabelNames(context.Background(), toolRequest("loki_label_names", args))
+		res, err := newTestHandlers(t).HandleLabelNames(context.Background(), toolRequest("loki_label_names", args))
 		if err != nil {
 			t.Fatalf("HandleLokiLabelNames returned error: %v", err)
 		}
@@ -86,7 +86,7 @@ func TestHandleLokiLabelNames(t *testing.T) {
 		srv, _ := newFakeLabelLoki(t, labelResponseBody)
 		args := map[string]any{"url": srv.URL, "format": "xml"}
 
-		_, err := HandleLokiLabelNames(context.Background(), toolRequest("loki_label_names", args))
+		_, err := newTestHandlers(t).HandleLabelNames(context.Background(), toolRequest("loki_label_names", args))
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -116,7 +116,7 @@ func TestHandleLokiLabelValues(t *testing.T) {
 				args["format"] = tt.format
 			}
 
-			res, err := HandleLokiLabelValues(context.Background(), toolRequest("loki_label_values", args))
+			res, err := newTestHandlers(t).HandleLabelValues(context.Background(), toolRequest("loki_label_values", args))
 			if err != nil {
 				t.Fatalf("HandleLokiLabelValues returned error: %v", err)
 			}
@@ -133,7 +133,7 @@ func TestHandleLokiLabelValues(t *testing.T) {
 		srv, _ := newFakeLabelLoki(t, labelResponseBody)
 		args := map[string]any{"url": srv.URL, "label": "app", "format": "xml"}
 
-		_, err := HandleLokiLabelValues(context.Background(), toolRequest("loki_label_values", args))
+		_, err := newTestHandlers(t).HandleLabelValues(context.Background(), toolRequest("loki_label_values", args))
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -148,9 +148,10 @@ func TestHandleLokiLabelValues(t *testing.T) {
 func TestHandleLokiLabels_TimeRangeErrors(t *testing.T) {
 	t.Parallel()
 
-	handlers := map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error){
-		"loki_label_names":  HandleLokiLabelNames,
-		"loki_label_values": HandleLokiLabelValues,
+	h := newTestHandlers(t)
+	toolHandlers := map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error){
+		"loki_label_names":  h.HandleLabelNames,
+		"loki_label_values": h.HandleLabelValues,
 	}
 
 	cases := []struct {
@@ -161,7 +162,7 @@ func TestHandleLokiLabels_TimeRangeErrors(t *testing.T) {
 		{field: "end", want: "invalid end time: unsupported time format: nope"},
 	}
 
-	for name, handler := range handlers {
+	for name, handler := range toolHandlers {
 		for _, tc := range cases {
 			t.Run(name+"/"+tc.field, func(t *testing.T) {
 				t.Parallel()
@@ -192,7 +193,7 @@ func TestHandleLokiLabels_RequestErrors(t *testing.T) {
 	t.Run("label names", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := HandleLokiLabelNames(context.Background(),
+		_, err := newTestHandlers(t).HandleLabelNames(context.Background(),
 			toolRequest("loki_label_names", map[string]any{"url": srv.URL}))
 		if err == nil {
 			t.Fatal("expected error")
@@ -205,7 +206,7 @@ func TestHandleLokiLabels_RequestErrors(t *testing.T) {
 	t.Run("label values", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := HandleLokiLabelValues(context.Background(),
+		_, err := newTestHandlers(t).HandleLabelValues(context.Background(),
 			toolRequest("loki_label_values", map[string]any{"url": srv.URL, "label": "app"}))
 		if err == nil {
 			t.Fatal("expected error")
@@ -220,7 +221,7 @@ func TestHandleLokiLabels_RequestErrors(t *testing.T) {
 func TestHandleLokiLabels_BindErrors(t *testing.T) {
 	t.Parallel()
 
-	_, err := HandleLokiLabelValues(context.Background(),
+	_, err := newTestHandlers(t).HandleLabelValues(context.Background(),
 		toolRequest("loki_label_values", map[string]any{"label": float64(1)}))
 	if err == nil {
 		t.Fatal("expected error")
@@ -232,14 +233,10 @@ func TestHandleLokiLabels_BindErrors(t *testing.T) {
 
 // TestHandleLokiLabels_WithQueryFilter pins that a configured filter switches
 // both handlers to the HTTP client and sends the filter as a query parameter.
-// It mutates package-global filter state, so it must stay serial.
 func TestHandleLokiLabels_WithQueryFilter(t *testing.T) {
-	ResetFilterConfig()
-	t.Cleanup(ResetFilterConfig)
+	t.Parallel()
 
-	if err := InitializeFilterConfig(`{namespace="prod"}`); err != nil {
-		t.Fatalf("InitializeFilterConfig failed: %v", err)
-	}
+	h := New(newTestConfig(t, `{namespace="prod"}`, false))
 
 	tests := []struct {
 		name     string
@@ -249,7 +246,7 @@ func TestHandleLokiLabels_WithQueryFilter(t *testing.T) {
 		{
 			name: "label names",
 			call: func(srv *httptest.Server) (*mcp.CallToolResult, error) {
-				return HandleLokiLabelNames(context.Background(),
+				return h.HandleLabelNames(context.Background(),
 					toolRequest("loki_label_names", map[string]any{"url": srv.URL}))
 			},
 			wantPath: "/loki/api/v1/labels",
@@ -257,7 +254,7 @@ func TestHandleLokiLabels_WithQueryFilter(t *testing.T) {
 		{
 			name: "label values",
 			call: func(srv *httptest.Server) (*mcp.CallToolResult, error) {
-				return HandleLokiLabelValues(context.Background(),
+				return h.HandleLabelValues(context.Background(),
 					toolRequest("loki_label_values", map[string]any{"url": srv.URL, "label": "app"}))
 			},
 			wantPath: "/loki/api/v1/label/app/values",

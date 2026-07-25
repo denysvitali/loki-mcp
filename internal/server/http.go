@@ -11,6 +11,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/kaiko-ai/loki-mcp/internal/handlers"
 	"github.com/kaiko-ai/loki-mcp/internal/logging"
 )
 
@@ -33,10 +34,10 @@ func DefaultHTTPConfig() HTTPConfig {
 const defaultShutdownTimeout = 5 * time.Second
 
 // RunHTTP starts the MCP server in HTTP mode
-func RunHTTP(version string, cfg HTTPConfig) error {
+func RunHTTP(version string, cfg HTTPConfig, handlerCfg handlers.Config) error {
 	defer shutdownTelemetry()
 
-	s := New(version)
+	s := New(version, handlerCfg)
 
 	mux := http.NewServeMux()
 

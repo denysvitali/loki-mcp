@@ -235,56 +235,57 @@ func TestBuildFilterSelector(t *testing.T) {
 	}
 }
 
-func TestFilterConfig(t *testing.T) {
-	// Reset config before and after test
-	ResetFilterConfig()
-	defer ResetFilterConfig()
+// TestNewConfig covers the parsing of the raw query filter into matchers.
+func TestNewConfig(t *testing.T) {
+	t.Parallel()
 
-	// Test that GetFilterConfig returns nil initially
-	if cfg := GetFilterConfig(); cfg != nil {
-		t.Error("GetFilterConfig() should return nil before initialization")
+	tests := []struct {
+		name         string
+		rawFilter    string
+		wantMatchers int
+		wantErr      bool
+	}{
+		{name: "valid selector", rawFilter: `{namespace="prod"}`, wantMatchers: 1},
+		{name: "multiple matchers", rawFilter: `{namespace="prod", job="api"}`, wantMatchers: 2},
+		{name: "empty filter leaves queries unrestricted", rawFilter: ""},
+		{name: "invalid filter", rawFilter: "invalid filter", wantErr: true},
 	}
 
-	// Test initialization with valid filter
-	err := InitializeFilterConfig(`{namespace="prod"}`)
-	if err != nil {
-		t.Errorf("InitializeFilterConfig() unexpected error: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	cfg := GetFilterConfig()
-	if cfg == nil {
-		t.Fatal("GetFilterConfig() should not return nil after initialization")
-	}
+			cfg, err := NewConfig(tt.rawFilter, false)
 
-	if cfg.RawFilter != `{namespace="prod"}` {
-		t.Errorf("FilterConfig.RawFilter = %q, want %q", cfg.RawFilter, `{namespace="prod"}`)
-	}
-
-	if len(cfg.Matchers) != 1 {
-		t.Errorf("FilterConfig.Matchers length = %d, want 1", len(cfg.Matchers))
-	}
-}
-
-func TestFilterConfig_EmptyFilter(t *testing.T) {
-	ResetFilterConfig()
-	defer ResetFilterConfig()
-
-	err := InitializeFilterConfig("")
-	if err != nil {
-		t.Errorf("InitializeFilterConfig() with empty filter should not error: %v", err)
-	}
-
-	if cfg := GetFilterConfig(); cfg != nil {
-		t.Error("GetFilterConfig() should return nil after initializing with empty filter")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("NewConfig() should have returned an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewConfig() unexpected error: %v", err)
+			}
+			if len(cfg.QueryFilter) != tt.wantMatchers {
+				t.Errorf("QueryFilter length = %d, want %d", len(cfg.QueryFilter), tt.wantMatchers)
+			}
+			if cfg.Detector != nil {
+				t.Error("Detector should be nil when secret filtering is disabled")
+			}
+		})
 	}
 }
 
-func TestFilterConfig_InvalidFilter(t *testing.T) {
-	ResetFilterConfig()
-	defer ResetFilterConfig()
-
-	err := InitializeFilterConfig("invalid filter")
-	if err == nil {
-		t.Error("InitializeFilterConfig() with invalid filter should return error")
+// TestNewConfig_SecretFilter covers the detector half of the configuration.
+func TestNewConfig_SecretFilter(t *testing.T) {
+	cfg, err := NewConfig("", true)
+	if err != nil {
+		t.Fatalf("NewConfig() unexpected error: %v", err)
+	}
+	if cfg.Detector == nil {
+		t.Fatal("Detector should be set when secret filtering is enabled")
+	}
+	if !cfg.Detector.SkipFindingAppend {
+		t.Error("Detector should skip appending findings")
 	}
 }

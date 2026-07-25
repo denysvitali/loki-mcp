@@ -8,7 +8,7 @@ import (
 )
 
 // New creates a new MCP server with all Loki tools registered
-func New(version string) *server.MCPServer {
+func New(version string, cfg handlers.Config) *server.MCPServer {
 	s := server.NewMCPServer(
 		"Loki MCP Server",
 		version,
@@ -17,17 +17,16 @@ func New(version string) *server.MCPServer {
 		server.WithToolHandlerMiddleware(telemetry.ToolHandlerMiddleware()),
 	)
 
+	h := handlers.New(cfg)
+
 	// Add Loki query tool
-	lokiQueryTool := handlers.NewLokiQueryTool()
-	s.AddTool(lokiQueryTool, handlers.HandleLokiQuery)
+	s.AddTool(h.QueryTool(), h.HandleQuery)
 
 	// Add Loki label names tool
-	lokiLabelNamesTool := handlers.NewLokiLabelNamesTool()
-	s.AddTool(lokiLabelNamesTool, handlers.HandleLokiLabelNames)
+	s.AddTool(h.LabelNamesTool(), h.HandleLabelNames)
 
 	// Add Loki label values tool
-	lokiLabelValuesTool := handlers.NewLokiLabelValuesTool()
-	s.AddTool(lokiLabelValuesTool, handlers.HandleLokiLabelValues)
+	s.AddTool(h.LabelValuesTool(), h.HandleLabelValues)
 
 	return s
 }

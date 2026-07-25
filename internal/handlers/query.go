@@ -12,8 +12,8 @@ import (
 	"github.com/kaiko-ai/loki-mcp/internal/telemetry"
 )
 
-// HandleLokiQuery handles Loki query tool requests
-func HandleLokiQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// HandleQuery handles loki_query tool requests.
+func (h *Handlers) HandleQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var params LokiParams
 	if err := request.BindArguments(&params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -24,7 +24,7 @@ func HandleLokiQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 		return nil, fmt.Errorf("head and tail parameters are mutually exclusive")
 	}
 
-	if err := applyQueryFilter(&params); err != nil {
+	if err := h.applyQueryFilter(&params); err != nil {
 		return nil, err
 	}
 
@@ -40,7 +40,7 @@ func HandleLokiQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 
 	// Secret filtering runs before formatting so raw, text and JSON output all
 	// use the sanitized data.
-	secretSummary := applyPostProcessing(ctx, result, &params)
+	secretSummary := h.applyPostProcessing(ctx, result, &params)
 
 	formattedResult, err := formatLokiResults(result, params.Format)
 	if err != nil {
@@ -55,13 +55,12 @@ func HandleLokiQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 
 // applyQueryFilter ANDs the configured stream selector into the client query.
 // It is a no-op when no filter is configured.
-func applyQueryFilter(params *LokiParams) error {
-	cfg := GetFilterConfig()
-	if cfg == nil {
+func (h *Handlers) applyQueryFilter(params *LokiParams) error {
+	if len(h.cfg.QueryFilter) == 0 {
 		return nil
 	}
 
-	mergedQuery, err := MergeQueryWithFilter(params.Query, cfg.Matchers)
+	mergedQuery, err := MergeQueryWithFilter(params.Query, h.cfg.QueryFilter)
 	if err != nil {
 		return fmt.Errorf("failed to apply query filter: %w", err)
 	}
@@ -100,8 +99,8 @@ func runQueryRange(ctx context.Context, params *LokiParams, start, end time.Time
 // applyPostProcessing rewrites result in place with the filtered, secret-scanned
 // and head/tail-limited entries, and returns a summary of what was omitted.
 // Non-stream and empty results are left untouched.
-func applyPostProcessing(ctx context.Context, result *loghttp.QueryResponse, params *LokiParams) SecretFilterSummary {
-	if params.Filter == "" && params.Head <= 0 && params.Tail <= 0 && !secretFilteringEnabled() {
+func (h *Handlers) applyPostProcessing(ctx context.Context, result *loghttp.QueryResponse, params *LokiParams) SecretFilterSummary {
+	if params.Filter == "" && params.Head <= 0 && params.Tail <= 0 && h.cfg.Detector == nil {
 		return SecretFilterSummary{}
 	}
 
@@ -110,7 +109,7 @@ func applyPostProcessing(ctx context.Context, result *loghttp.QueryResponse, par
 		return SecretFilterSummary{}
 	}
 
-	processed, summary := postProcessStreams(ctx, streams, params)
+	processed, summary := h.postProcessStreams(ctx, streams, params)
 	result.Data.Result = processed
 
 	if summary.LinesOmitted > 0 {
@@ -124,7 +123,7 @@ func applyPostProcessing(ctx context.Context, result *loghttp.QueryResponse, par
 // postProcessStreams flattens streams into a time-ordered entry list, applies
 // the keyword filter, drops lines containing secrets, applies head/tail and
 // regroups the survivors back into streams.
-func postProcessStreams(ctx context.Context, streams loghttp.Streams, params *LokiParams) (loghttp.Streams, SecretFilterSummary) {
+func (h *Handlers) postProcessStreams(ctx context.Context, streams loghttp.Streams, params *LokiParams) (loghttp.Streams, SecretFilterSummary) {
 	entries := collectAndSortEntries(streams)
 
 	if params.Filter != "" {
@@ -132,16 +131,11 @@ func postProcessStreams(ctx context.Context, streams loghttp.Streams, params *Lo
 	}
 
 	// Omit any lines that contain secrets before output limiting.
-	entries, summary := filterSecretEntries(ctx, entries)
+	entries, summary := filterSecretEntries(ctx, h.cfg.Detector, entries)
 
 	if params.Head > 0 || params.Tail > 0 {
 		entries = applyHeadTail(entries, int(params.Head), int(params.Tail))
 	}
 
 	return entriesToStreams(entries), summary
-}
-
-func secretFilteringEnabled() bool {
-	cfg := GetSecretFilterConfig()
-	return cfg != nil && cfg.Enabled && cfg.detector != nil
 }

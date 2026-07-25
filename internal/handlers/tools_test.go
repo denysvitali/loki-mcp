@@ -19,13 +19,15 @@ func TestToolSchemas(t *testing.T) {
 	t.Cleanup(viper.Reset)
 	viper.Set("url", "http://loki.example:3100")
 
+	h := newTestHandlers(t)
+
 	tests := []struct {
 		golden string
 		tool   mcp.Tool
 	}{
-		{golden: "testdata/loki_query.tool.json", tool: NewLokiQueryTool()},
-		{golden: "testdata/loki_label_names.tool.json", tool: NewLokiLabelNamesTool()},
-		{golden: "testdata/loki_label_values.tool.json", tool: NewLokiLabelValuesTool()},
+		{golden: "testdata/loki_query.tool.json", tool: h.QueryTool()},
+		{golden: "testdata/loki_label_names.tool.json", tool: h.LabelNamesTool()},
+		{golden: "testdata/loki_label_values.tool.json", tool: h.LabelValuesTool()},
 	}
 
 	for _, tt := range tests {
@@ -55,7 +57,9 @@ func TestToolSchemas_URLDefaultComesFromViper(t *testing.T) {
 	t.Cleanup(viper.Reset)
 	viper.Set("url", "http://elsewhere:9999")
 
-	for _, tool := range []mcp.Tool{NewLokiQueryTool(), NewLokiLabelNamesTool(), NewLokiLabelValuesTool()} {
+	h := newTestHandlers(t)
+
+	for _, tool := range []mcp.Tool{h.QueryTool(), h.LabelNamesTool(), h.LabelValuesTool()} {
 		prop, ok := tool.InputSchema.Properties["url"].(map[string]any)
 		if !ok {
 			t.Fatalf("%s: url property missing or of unexpected type", tool.Name)
