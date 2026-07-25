@@ -12,6 +12,10 @@ ALLOWED_FINDINGS = {
         "Prometheus stored-XSS advisory is currently reported with no fixed "
         "version and is reachable through the Loki SDK dependency graph."
     ),
+    "GO-2026-5932": (
+        "golang.org/x/crypto/openpgp is unmaintained with no fixed version. "
+        "It is pulled in transitively and is not called by this module."
+    ),
 }
 
 
