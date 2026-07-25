@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -26,6 +27,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/kaiko-ai/loki-mcp/internal/logging"
 )
 
 const instrumentationName = "github.com/kaiko-ai/loki-mcp"
@@ -37,15 +40,28 @@ type Config struct {
 }
 
 var (
+	// shutdownMu guards shutdowns. It stays a Mutex rather than an atomic
+	// because registration and drain are both trivial critical sections with
+	// no I/O under the lock (Shutdown copies the slice out and invokes the
+	// functions after unlocking), and the process has exactly one telemetry
+	// stack, so contention is nonexistent.
 	shutdownMu sync.Mutex
 	shutdowns  []func(context.Context) error
 
-	instrumentMu        sync.RWMutex
+	// currentInstruments holds the metric instruments recorded on the hot
+	// path. Written only at init/shutdown (initInstruments builds the whole
+	// struct and stores it atomically); read on every tool call via Load.
+	currentInstruments atomic.Pointer[instruments]
+)
+
+// instruments bundles the four metric instruments so they can be swapped in
+// as one consistent snapshot when the real meter provider is installed.
+type instruments struct {
 	toolRequests        metric.Int64Counter
 	toolDuration        metric.Float64Histogram
 	secretFindings      metric.Int64Counter
 	secretLinesFiltered metric.Int64Counter
-)
+}
 
 // Initialize configures OpenTelemetry providers and instruments.
 func Initialize(ctx context.Context, cfg Config) error {
@@ -234,14 +250,14 @@ func ToolHandlerMiddleware() mcpserver.ToolHandlerMiddleware {
 				attribute.String("mcp.tool.name", toolName),
 				attribute.Bool("error", isError),
 			)
-			instrumentMu.RLock()
-			if toolRequests != nil {
-				toolRequests.Add(ctx, 1, metricAttrs)
+			if inst := currentInstruments.Load(); inst != nil {
+				if inst.toolRequests != nil {
+					inst.toolRequests.Add(ctx, 1, metricAttrs)
+				}
+				if inst.toolDuration != nil {
+					inst.toolDuration.Record(ctx, time.Since(start).Seconds(), metricAttrs)
+				}
 			}
-			if toolDuration != nil {
-				toolDuration.Record(ctx, time.Since(start).Seconds(), metricAttrs)
-			}
-			instrumentMu.RUnlock()
 
 			return result, err
 		}
@@ -250,45 +266,67 @@ func ToolHandlerMiddleware() mcpserver.ToolHandlerMiddleware {
 
 // RecordSecretFiltering records secret detection and omission metrics.
 func RecordSecretFiltering(ctx context.Context, findings, lines int) {
-	instrumentMu.RLock()
-	defer instrumentMu.RUnlock()
-	if findings > 0 && secretFindings != nil {
-		secretFindings.Add(ctx, int64(findings))
+	inst := currentInstruments.Load()
+	if inst == nil {
+		return
 	}
-	if lines > 0 && secretLinesFiltered != nil {
-		secretLinesFiltered.Add(ctx, int64(lines))
+	if findings > 0 && inst.secretFindings != nil {
+		inst.secretFindings.Add(ctx, int64(findings))
+	}
+	if lines > 0 && inst.secretLinesFiltered != nil {
+		inst.secretLinesFiltered.Add(ctx, int64(lines))
 	}
 }
 
 func initInstruments() {
 	meter := otel.Meter(instrumentationName)
-	requests, _ := meter.Int64Counter(
+	var errs []error
+
+	requests, err := meter.Int64Counter(
 		"loki_mcp_tool_requests_total",
 		metric.WithDescription("Total MCP tool requests"),
 		metric.WithUnit("{request}"),
 	)
-	duration, _ := meter.Float64Histogram(
+	if err != nil {
+		errs = append(errs, err)
+	}
+	duration, err := meter.Float64Histogram(
 		"loki_mcp_tool_duration_seconds",
 		metric.WithDescription("MCP tool request duration"),
 		metric.WithUnit("s"),
 	)
-	findings, _ := meter.Int64Counter(
+	if err != nil {
+		errs = append(errs, err)
+	}
+	findings, err := meter.Int64Counter(
 		"loki_mcp_secret_findings_total",
 		metric.WithDescription("Total secret findings detected in returned data"),
 		metric.WithUnit("{finding}"),
 	)
-	lines, _ := meter.Int64Counter(
+	if err != nil {
+		errs = append(errs, err)
+	}
+	lines, err := meter.Int64Counter(
 		"loki_mcp_secret_lines_filtered_total",
 		metric.WithDescription("Total log lines omitted due to detected secrets"),
 		metric.WithUnit("{line}"),
 	)
+	if err != nil {
+		errs = append(errs, err)
+	}
 
-	instrumentMu.Lock()
-	defer instrumentMu.Unlock()
-	toolRequests = requests
-	toolDuration = duration
-	secretFindings = findings
-	secretLinesFiltered = lines
+	// Practically unreachable, but do not drop these silently. Callers must
+	// not see a behaviour change, so log instead of returning the error.
+	if err := errors.Join(errs...); err != nil {
+		logging.Errorf("OpenTelemetry instrument creation error: %v", err)
+	}
+
+	currentInstruments.Store(&instruments{
+		toolRequests:        requests,
+		toolDuration:        duration,
+		secretFindings:      findings,
+		secretLinesFiltered: lines,
+	})
 }
 
 func otelDisabled() bool {
