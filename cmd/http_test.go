@@ -32,7 +32,10 @@ func TestHTTPFlags(t *testing.T) {
 		},
 	}
 
-	fs := httpCmd.Flags()
+	// LocalFlags, not Flags: once anything has executed `http`, cobra has
+	// merged the root's persistent flags into httpCmd.Flags() for good, and
+	// the enumeration below would see them too.
+	fs := httpCmd.LocalFlags()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := fs.Lookup(tt.name)
@@ -44,7 +47,13 @@ func TestHTTPFlags(t *testing.T) {
 	}
 
 	var registered []string
-	fs.VisitAll(func(f *pflag.Flag) { registered = append(registered, f.Name) })
+	fs.VisitAll(func(f *pflag.Flag) {
+		// --help is cobra's, added to whichever command executes.
+		if f.Name == "help" {
+			return
+		}
+		registered = append(registered, f.Name)
+	})
 	want := make([]string, 0, len(tests))
 	for _, tt := range tests {
 		want = append(want, tt.name)

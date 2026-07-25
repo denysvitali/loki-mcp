@@ -5,8 +5,10 @@
 // # What belongs here
 //
 //   - root.go — rootCmd, the persistent flags, the envFlag helpers, and the
-//     PersistentPreRunE that initialises logging, telemetry, the handler
-//     config and the Loki connectivity check.
+//     PersistentPreRunE that initialises logging, telemetry and the handler
+//     config. The Loki connectivity check is not in the hook: it belongs to
+//     the commands that serve traffic, so version, help and completion work
+//     with Loki down.
 //   - stdio.go, http.go — the two serving subcommands, each a thin RunE over
 //     server.RunStdio / server.RunHTTP. rootCmd reuses stdio's RunE, so a bare
 //     `loki-mcp` and `loki-mcp stdio` are the same command.
@@ -38,6 +40,9 @@
 //     --help cannot go stale.
 //   - handlerConfig is the only channel from PersistentPreRunE to a
 //     subcommand's RunE; cobra offers no other way to pass state between them.
+//   - rootCmd sets SilenceUsage so a runtime failure does not dump the usage
+//     block, and restores it from a SetFlagErrorFunc hook so genuine
+//     flag-parsing errors still print it.
 //   - Version is not set by ldflags directly. -ldflags sets main.version, and
 //     main assigns it to cmd.Version before calling Execute.
 //
@@ -46,9 +51,6 @@
 // FINDINGS.md documents behaviour of this package that a newcomer will
 // otherwise mistake for a bug in their own change:
 //
-//   - §3: PersistentPreRunE ends in pingLoki, and cobra runs it for every
-//     runnable subcommand, so `version`, `help` and `completion` all fail when
-//     Loki is unreachable.
 //   - §8: the port flag is bound to PORT by hand, but viper's AutomaticEnv
 //     resolves LOKI_PORT first, so the undocumented LOKI_PORT wins.
 package cmd

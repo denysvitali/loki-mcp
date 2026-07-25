@@ -18,6 +18,10 @@ Endpoints:
   /sse    - SSE event stream (legacy, can be disabled)
   /mcp    - SSE message endpoint (legacy, can be disabled)`,
 	RunE: func(_ *cobra.Command, _ []string) error {
+		if err := pingLoki(); err != nil {
+			return err
+		}
+
 		cfg := server.HTTPConfig{
 			Host:       viper.GetString("host"),
 			Port:       viper.GetString("port"),

@@ -24,8 +24,20 @@ import (
 var logs = &logCapture{}
 
 // TestMain installs the log capture hook before any test runs.
+//
+// It also creates cobra's completion command up front. Cobra normally creates
+// it inside the first Execute, and the generated script is written to the
+// writer the root command had *at that moment*, captured in a closure. Left
+// alone, that would be whichever test happened to call Execute first, making
+// `completion`'s output depend on test order; pinning it to io.Discard here
+// makes it deterministic and keeps the script out of the test log.
 func TestMain(m *testing.M) {
 	logging.AddHook(logs)
+
+	rootCmd.SetOut(io.Discard)
+	rootCmd.InitDefaultCompletionCmd()
+	rootCmd.SetOut(nil)
+
 	os.Exit(m.Run())
 }
 

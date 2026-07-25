@@ -76,6 +76,11 @@ mode explicitly:
   - stdio: For Claude Desktop and similar MCP clients (the default)
   - http:  For web-based clients and n8n`,
 	RunE: runStdio,
+	// A runtime failure — an unreachable Loki, a port already taken — is not
+	// misuse of the command line, so it must not dump the usage block after
+	// the error (FINDINGS.md §3). Genuine flag-parsing errors still get it;
+	// see the SetFlagErrorFunc hook in init().
+	SilenceUsage: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		if err := initLogging(); err != nil {
 			return err
@@ -91,7 +96,11 @@ mode explicitly:
 		}
 		handlerConfig = cfg
 
-		return pingLoki()
+		// pingLoki is deliberately not called here: cobra runs this hook for
+		// every runnable command, and version, help and completion have no
+		// business needing a reachable Loki (FINDINGS.md §3). The serving
+		// commands ping from their own RunE instead.
+		return nil
 	},
 }
 
@@ -143,7 +152,10 @@ func buildHandlerConfig() (handlers.Config, error) {
 	return cfg, nil
 }
 
-// pingLoki verifies connectivity to Loki before the server starts.
+// pingLoki verifies connectivity to Loki before the server starts. Every
+// command that serves traffic calls it first — the bare invocation and stdio
+// through runStdio, http through its own RunE — and no other command calls it
+// at all.
 func pingLoki() error {
 	params := &handlers.LokiParams{
 		URL:      viper.GetString("url"),
@@ -169,9 +181,9 @@ func pingLoki() error {
 // run by then, because it happens in deferred calls inside the Run* functions
 // rather than out here.
 //
-// Cobra prints the error and the full usage block on failure; SilenceUsage is
-// not set, so even a runtime failure like an unreachable Loki produces a usage
-// dump (FINDINGS.md §3).
+// Cobra prints the error on failure. The usage block comes with it only for
+// flag-parsing errors and unknown subcommands, not for runtime failures such
+// as an unreachable Loki; see rootCmd's SilenceUsage.
 //
 // Call it once, from the main goroutine.
 func Execute() {
@@ -181,6 +193,19 @@ func Execute() {
 }
 
 func init() {
+	// rootCmd.SilenceUsage suppresses the usage block for every error, which
+	// is wrong for the one class of error it genuinely helps with: a
+	// mistyped or malformed flag. Cobra reads SilenceUsage only after
+	// execute() returns, so clearing it from here — the hook cobra calls the
+	// moment flag parsing fails — restores the usage block for exactly those
+	// errors, in cobra's own "Error: …" then usage order. Unknown
+	// subcommands take a different path and keep their own hint.
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		c.SilenceUsage = false
+		rootCmd.SilenceUsage = false
+		return err
+	})
+
 	// Persistent flags
 	pf := rootCmd.PersistentFlags()
 	envFlag(pf, "query-filter", "f", "",
