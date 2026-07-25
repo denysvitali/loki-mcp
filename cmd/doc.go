@@ -43,14 +43,9 @@
 //   - rootCmd sets SilenceUsage so a runtime failure does not dump the usage
 //     block, and restores it from a SetFlagErrorFunc hook so genuine
 //     flag-parsing errors still print it.
+//   - --port is the one flag not bound to viper. Binding it would place it
+//     under AutomaticEnv, where LOKI_PORT outranks the documented PORT;
+//     resolvePort reads the flag and PORT by hand instead.
 //   - Version is not set by ldflags directly. -ldflags sets main.version, and
 //     main assigns it to cmd.Version before calling Execute.
-//
-// # Known defects, reported not fixed
-//
-// FINDINGS.md documents behaviour of this package that a newcomer will
-// otherwise mistake for a bug in their own change:
-//
-//   - §8: the port flag is bound to PORT by hand, but viper's AutomaticEnv
-//     resolves LOKI_PORT first, so the undocumented LOKI_PORT wins.
 package cmd

@@ -78,10 +78,13 @@ func pkgViperState() {
 	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
 		_ = viper.BindPFlag(f.Name, f)
 	})
-	httpCmd.Flags().VisitAll(func(f *pflag.Flag) {
+	httpCmd.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		// --port is not bound to viper by the package: see resolvePort.
+		if f.Name == "port" || f.Name == "help" {
+			return
+		}
 		_ = viper.BindPFlag(f.Name, f)
 	})
-	_ = viper.BindEnv("port", "PORT")
 }
 
 // isolateViper puts the process-wide viper back into its load-time state
