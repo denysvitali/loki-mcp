@@ -224,15 +224,132 @@ func TestFormatLokiResults_EmptyStreams(t *testing.T) {
 		}
 	})
 
-	t.Run("with warnings raw still reports no logs", func(t *testing.T) {
+	// Inverted expectation: an empty result used to swallow the warnings too.
+	t.Run("with warnings raw reports no logs and the warnings", func(t *testing.T) {
 		t.Parallel()
 
 		got, err := formatLokiResults(empty("1 line omitted due to detected secrets"), "raw")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if want := "No logs found matching the query"; got != want {
+		want := "No logs found matching the query\n\n" +
+			"Warnings:\n" +
+			"  - loki-mcp: 1 line omitted due to detected secrets\n"
+		if got != want {
 			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+}
+
+// TestFormatLokiResults_WarningsBlock pins the trailing warnings block that
+// raw and text render. Before FINDINGS.md §12 both formats dropped
+// result.Warnings on the floor, so an upstream Loki warning never reached a
+// non-JSON client.
+func TestFormatLokiResults_WarningsBlock(t *testing.T) {
+	t.Parallel()
+
+	withWarnings := func(warnings ...string) *loghttp.QueryResponse {
+		r := streamsResponse()
+		r.Warnings = warnings
+		return r
+	}
+
+	tests := []struct {
+		name     string
+		format   string
+		warnings []string
+		want     string
+	}{
+		{
+			name:   "raw without warnings is unchanged",
+			format: "raw",
+			want:   "2024-01-15T10:30:45Z {job=\"test-job\"} hello\n",
+		},
+		{
+			name:     "raw appends one blank line then the block",
+			format:   "raw",
+			warnings: []string{"a genuine warning from Loki"},
+			want: "2024-01-15T10:30:45Z {job=\"test-job\"} hello\n\n" +
+				"Warnings:\n" +
+				"  - a genuine warning from Loki\n",
+		},
+		{
+			name:   "text without warnings is unchanged",
+			format: "text",
+			want:   "Found 1 streams:\n\nStream {job=\"test-job\"} 1:\n[2024-01-15T10:30:45Z] hello\n\n",
+		},
+		{
+			name:     "text reuses the blank line it already ends with",
+			format:   "text",
+			warnings: []string{"a genuine warning from Loki", "and another"},
+			want: "Found 1 streams:\n\nStream {job=\"test-job\"} 1:\n[2024-01-15T10:30:45Z] hello\n\n" +
+				"Warnings:\n" +
+				"  - a genuine warning from Loki\n" +
+				"  - and another\n",
+		},
+		{
+			name:     "the tool's own note is tagged, Loki's is not",
+			format:   "raw",
+			warnings: []string{"a genuine warning from Loki", "3 lines omitted due to detected secrets"},
+			want: "2024-01-15T10:30:45Z {job=\"test-job\"} hello\n\n" +
+				"Warnings:\n" +
+				"  - a genuine warning from Loki\n" +
+				"  - loki-mcp: 3 lines omitted due to detected secrets\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := formatLokiResults(withWarnings(tt.warnings...), tt.format)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("formatLokiResults(%q) =\n%q\nwant\n%q", tt.format, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTagInternalWarnings pins which warnings get the loki-mcp: prefix. Only
+// the notes this server produces with formatSecretOmissionNote do; anything
+// Loki sent passes through byte for byte, including near-misses.
+func TestTagInternalWarnings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"1 line omitted due to detected secrets", "loki-mcp: 1 line omitted due to detected secrets"},
+		{"12 lines omitted due to detected secrets", "loki-mcp: 12 lines omitted due to detected secrets"},
+		{"a genuine warning from Loki", "a genuine warning from Loki"},
+		{"", ""},
+		// Near-misses: the count and the plural must both match the note.
+		{"1 lines omitted due to detected secrets", "1 lines omitted due to detected secrets"},
+		{"2 line omitted due to detected secrets", "2 line omitted due to detected secrets"},
+		{"0 lines omitted due to detected secrets", "0 lines omitted due to detected secrets"},
+		{"1 line omitted due to detected secrets (from Loki)", "1 line omitted due to detected secrets (from Loki)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+
+			got := tagInternalWarnings([]string{tt.in})
+			if len(got) != 1 || got[0] != tt.want {
+				t.Errorf("tagInternalWarnings(%q) = %q, want [%q]", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("empty input yields nil so the JSON field is omitted", func(t *testing.T) {
+		t.Parallel()
+
+		if got := tagInternalWarnings(nil); got != nil {
+			t.Errorf("tagInternalWarnings(nil) = %q, want nil", got)
 		}
 	})
 }
@@ -653,8 +770,10 @@ func TestFormatLokiResults_EmptyJSONWithWarnings(t *testing.T) {
 	if !strings.Contains(output, `"warnings"`) {
 		t.Errorf("Expected output to contain warnings, got:\n%s", output)
 	}
-	if !strings.Contains(output, "detected secrets") {
-		t.Errorf("Expected output to contain secret omission note, got:\n%s", output)
+	// Inverted expectation: the note now carries the loki-mcp: tag that tells
+	// a JSON client it came from this server and not from Loki.
+	if !strings.Contains(output, "loki-mcp: 1 line omitted due to detected secrets") {
+		t.Errorf("Expected output to contain the tagged secret omission note, got:\n%s", output)
 	}
 }
 
