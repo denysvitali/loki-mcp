@@ -39,11 +39,10 @@ import (
 //     label-set string, so post-processing does not change the ordering a
 //     client sees.
 //
-// When lines are withheld the count is reported twice over, by two channels
-// that do not overlap: appended to the rendered text for raw and text, and
-// added to the response's Warnings array for json. Neither format shows the
-// other's copy, and raw and text drop Loki's genuine warnings entirely
-// (FINDINGS.md §12).
+// When lines are withheld the count is added to the response's Warnings, which
+// every format renders: json as the warnings array, raw and text as a trailing
+// Warnings block. The tool's own note is prefixed "loki-mcp: " so a client can
+// tell it apart from a warning Loki itself returned.
 //
 // ctx bounds the Loki request and is polled by the secret scan; a cancelled
 // scan yields the lines checked so far rather than an error.
@@ -74,14 +73,11 @@ func (h *Handlers) HandleQuery(ctx context.Context, request mcp.CallToolRequest)
 
 	// Secret filtering runs before formatting so raw, text and JSON output all
 	// use the sanitized data.
-	secretSummary := h.applyPostProcessing(ctx, result, &params)
+	h.applyPostProcessing(ctx, result, &params)
 
 	formattedResult, err := formatLokiResults(result, params.Format)
 	if err != nil {
 		return nil, fmt.Errorf("failed to format results: %w", err)
-	}
-	if secretSummary.LinesOmitted > 0 && Format(params.Format) != FormatJSON {
-		formattedResult += "\n" + formatSecretOmissionNote(secretSummary.LinesOmitted)
 	}
 
 	return mcp.NewToolResultText(formattedResult), nil

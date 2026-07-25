@@ -573,7 +573,7 @@ func TestHandleLokiQuery_SecretFiltering(t *testing.T) {
 
 	h := New(newTestConfig(t, "", true))
 
-	t.Run("raw appends the omission note", func(t *testing.T) {
+	t.Run("raw reports the omission note once, in the warnings block", func(t *testing.T) {
 		srv, _ := newFakeQueryLoki(t, body)
 		args := map[string]any{"query": `{job="api"}`, "url": srv.URL}
 
@@ -582,15 +582,12 @@ func TestHandleLokiQuery_SecretFiltering(t *testing.T) {
 			t.Fatalf("HandleQuery returned error: %v", err)
 		}
 
-		// The note is currently reported twice for raw: once by the renderer's
-		// warnings block (FINDINGS.md §12, fixed in format.go) and once more
-		// by HandleQuery, which still appends it to the rendered string.
-		// Deleting that append in HandleQuery is the remaining half of the fix;
-		// when it lands, drop the last two lines of this expectation.
+		// The note reaches every format through result.Warnings; raw renders
+		// it as the trailing warnings block. HandleQuery used to append a
+		// second, untagged copy for raw and text only.
 		want := "2024-01-15T10:00:00Z {job=\"api\"} harmless line\n\n" +
 			"Warnings:\n" +
-			"  - loki-mcp: 1 line omitted due to detected secrets\n" +
-			"\n1 line omitted due to detected secrets"
+			"  - loki-mcp: 1 line omitted due to detected secrets\n"
 		if got := resultText(t, res); got != want {
 			t.Errorf("output = %q, want %q", got, want)
 		}
