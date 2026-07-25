@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"sync"
 	"testing"
 
+	"github.com/betterleaks/betterleaks/detect"
 	"github.com/prometheus/prometheus/model/labels"
 )
 
@@ -373,5 +375,39 @@ func TestNewConfig_SecretFilter(t *testing.T) {
 	}
 	if !cfg.Detector.SkipFindingAppend {
 		t.Error("Detector should skip appending findings")
+	}
+}
+
+// TestNewConfig_SecretDetectorIsShared pins that every Config gets the same
+// detector and that concurrent NewConfig calls are race-free. Exactly one
+// detector per process is what keeps the betterleaks/tiktoken global-write
+// hazard out of reach (FINDINGS.md §11); run under -race to mean anything.
+func TestNewConfig_SecretDetectorIsShared(t *testing.T) {
+	const goroutines = 8
+
+	detectors := make([]*detect.Detector, goroutines)
+	var wg sync.WaitGroup
+	for i := range detectors {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			cfg, err := NewConfig("", true)
+			if err != nil {
+				t.Errorf("NewConfig() unexpected error: %v", err)
+				return
+			}
+			detectors[i] = cfg.Detector
+		}()
+	}
+	wg.Wait()
+
+	for i, d := range detectors {
+		if d == nil {
+			t.Fatalf("goroutine %d got a nil Detector", i)
+		}
+		if d != detectors[0] {
+			t.Errorf("goroutine %d got detector %p, want the shared %p", i, d, detectors[0])
+		}
 	}
 }
