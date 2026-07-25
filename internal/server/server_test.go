@@ -218,25 +218,120 @@ func TestRunHTTP(t *testing.T) {
 				_ = sseResp.Body.Close()
 			}
 
-			// SIGINT triggers graceful shutdown and RunHTTP returns.
-			//
-			// The returned error is nil when every connection is already idle
-			// by the time Shutdown runs. It is context.Canceled when one is
-			// not: the shutdown context inherits the cancelled signal context,
-			// so Shutdown gives up immediately instead of waiting out
-			// defaultShutdownTimeout. That is pre-existing behaviour (it
-			// predates the newMux/serve split) and it is what makes the
-			// "sse enabled" case racy, so accept either outcome here rather
-			// than pin a race.
+			// SIGINT triggers graceful shutdown and RunHTTP returns nil.
 			require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGINT))
 			select {
 			case err := <-errCh:
-				if err != nil {
-					require.ErrorIs(t, err, context.Canceled)
-				}
+				require.NoError(t, err)
 			case <-time.After(10 * time.Second):
 				t.Fatal("RunHTTP did not return within 10s of SIGINT")
 			}
 		})
 	}
+}
+
+// TestRunHTTPDrainsInFlightConnection pins the grace period from the side that
+// must succeed: a connection that is still active when the signal arrives is
+// drained rather than dropped, and RunHTTP still returns nil.
+//
+// The /sse stream is opened first and released only after the signal has been
+// delivered, so the server is provably non-quiescent at the moment Shutdown
+// starts — the case where Shutdown consults its context instead of returning
+// straight away. It then goes idle well inside defaultShutdownTimeout, so the
+// drain completes and the return value is nil.
+//
+// Before FINDINGS.md §7 was fixed this returned context.Canceled, because the
+// shutdown context was derived from the signal context that had just fired.
+func TestRunHTTPDrainsInFlightConnection(t *testing.T) {
+	addr, errCh := startRunHTTP(t, false)
+
+	// t.Context() is cancelled during cleanup, which would close the stream
+	// for us; this request has to outlive the signal, so root it elsewhere.
+	sseReq, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"http://"+addr+"/sse", nil)
+	require.NoError(t, err)
+	//nolint:bodyclose // deliberately held open past the signal; the goroutine below closes it.
+	sseResp, err := http.DefaultClient.Do(sseReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, sseResp.StatusCode)
+
+	// Signal first, release the connection after: the ordering is what makes
+	// the in-flight connection deterministic rather than a race.
+	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGINT))
+
+	closerDone := make(chan struct{})
+	go func() {
+		defer close(closerDone)
+		time.Sleep(150 * time.Millisecond)
+		_ = sseResp.Body.Close()
+	}()
+	defer func() { <-closerDone }()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err, "shutdown must drain the in-flight connection and return nil")
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunHTTP did not return within 10s of SIGINT")
+	}
+}
+
+// TestServeShutdownDeadlineExceeded pins the other side: a request that
+// outlives defaultShutdownTimeout is not waited for indefinitely. serve gives
+// up after the budget and returns context.DeadlineExceeded unwrapped, having
+// logged "HTTP server shutdown error: ...".
+//
+// This is the same thing a client holding /sse open across the signal sees,
+// exercised through serve so the blocking is explicit. It costs a real 5s
+// because defaultShutdownTimeout is a constant, and shortening it for the test
+// would mean adding a configuration knob nothing in production sets.
+func TestServeShutdownDeadlineExceeded(t *testing.T) {
+	release := make(chan struct{})
+	handlerReturned := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/block", func(w http.ResponseWriter, _ *http.Request) {
+		defer close(handlerReturned)
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-release
+	})
+
+	addr := "127.0.0.1:" + freePort(t)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: time.Second,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- serve(ctx, srv, HTTPConfig{}) }()
+	require.NoError(t, waitForServer(t.Context(), addr, serveErr))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"http://"+addr+"/block", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// The handler never returns on its own, so the drain cannot complete.
+	cancel()
+
+	select {
+	case err := <-serveErr:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(30 * time.Second):
+		t.Fatal("serve did not return after the shutdown deadline")
+	}
+
+	// Let everything unwind so goleak stays happy.
+	close(release)
+	<-handlerReturned
+	_ = resp.Body.Close()
+	require.NoError(t, srv.Close())
 }

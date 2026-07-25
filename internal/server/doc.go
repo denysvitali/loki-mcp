@@ -33,12 +33,13 @@
 // transport at a time from any goroutine; the handlers it registers are safe
 // for concurrent calls (see internal/handlers).
 //
-// # Shutdown is not a full graceful drain
+// # Shutdown is a bounded graceful drain
 //
-// serve derives its shutdown context from the already-cancelled signal
-// context, so defaultShutdownTimeout is an upper bound that is never reached
-// and in-flight requests are dropped rather than drained. This is preserved
-// pre-refactor behaviour, not an intended design; FINDINGS.md §7 has the
-// reproduction and the one-line fix, which was deliberately not applied
-// because it changes the value RunHTTP returns on SIGTERM.
+// serve roots its shutdown context at context.Background(), not at the
+// already-done signal context, so defaultShutdownTimeout (5s) is a real budget:
+// in-flight requests are drained rather than dropped, and a signalled shutdown
+// that finishes inside the budget makes RunHTTP return nil. A drain that
+// outlives the budget — the obvious case being a client that holds /sse open
+// across the signal, since a streaming connection never goes idle — returns
+// context.DeadlineExceeded after the full 5s. That is the intended trade.
 package server
