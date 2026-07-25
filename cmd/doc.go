@@ -8,7 +8,8 @@
 //     PersistentPreRunE that initialises logging, telemetry, the handler
 //     config and the Loki connectivity check.
 //   - stdio.go, http.go — the two serving subcommands, each a thin RunE over
-//     server.RunStdio / server.RunHTTP.
+//     server.RunStdio / server.RunHTTP. rootCmd reuses stdio's RunE, so a bare
+//     `loki-mcp` and `loki-mcp stdio` are the same command.
 //   - version.go — the version subcommand.
 //
 // # What does not belong here
@@ -45,8 +46,6 @@
 // FINDINGS.md documents behaviour of this package that a newcomer will
 // otherwise mistake for a bug in their own change:
 //
-//   - §1: rootCmd has no Run/RunE, so a bare `loki-mcp` prints help and exits
-//     0 without starting any server.
 //   - §3: PersistentPreRunE ends in pingLoki, and cobra runs it for every
 //     runnable subcommand, so `version`, `help` and `completion` all fail when
 //     Loki is unreachable.

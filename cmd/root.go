@@ -62,18 +62,20 @@ var _ = func() bool {
 }()
 
 // rootCmd carries the persistent flags and the startup hook shared by every
-// subcommand. It has no Run of its own, so a bare `loki-mcp` prints help and
-// exits 0 without starting a server (FINDINGS.md §1) — and, because cobra
-// skips a non-runnable root's PersistentPreRunE, without pinging Loki either.
+// subcommand. Its RunE is stdio's, so a bare `loki-mcp` serves stdio instead
+// of printing help and exiting 0 (FINDINGS.md §1); being runnable also means
+// cobra now runs its PersistentPreRunE for the bare invocation.
 var rootCmd = &cobra.Command{
 	Use:   "loki-mcp",
 	Short: "MCP server for Grafana Loki",
 	Long: `An MCP (Model Context Protocol) server that provides Grafana Loki query tools
 to AI assistants like Claude Desktop, Cursor, and n8n.
 
-Use subcommands to run the server in different modes:
-  - stdio: For Claude Desktop and similar MCP clients
+With no subcommand, the server runs in stdio mode. Use subcommands to pick a
+mode explicitly:
+  - stdio: For Claude Desktop and similar MCP clients (the default)
   - http:  For web-based clients and n8n`,
+	RunE: runStdio,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		if err := initLogging(); err != nil {
 			return err

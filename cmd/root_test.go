@@ -1,8 +1,9 @@
 package cmd
 
 import (
-	"io"
+	"bytes"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -199,16 +200,64 @@ func TestVersionRequiresLoki(t *testing.T) {
 	viper.Set("url", closedLokiAddr(t))
 
 	out := captureStdout(t, func() {
-		err := executeRoot(t, "version")
+		_, _, err := executeRoot(t, "version")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "loki connectivity check failed: ")
 	})
 	assert.Empty(t, out, "the subcommand never runs")
 }
 
-// executeRoot runs the root command with args, discarding cobra's own output
-// and restoring the mutated command state afterwards.
-func executeRoot(t *testing.T, args ...string) error {
+// TestRootRunEIsStdio pins that a bare `loki-mcp` is literally the stdio
+// command: rootCmd is runnable, and its RunE is the same function stdioCmd
+// uses. Before FINDINGS.md §1 was fixed rootCmd had no Run at all, so the bare
+// invocation printed help and exited 0 without starting any server.
+func TestRootRunEIsStdio(t *testing.T) {
+	require.NotNil(t, rootCmd.RunE, "a bare invocation must be runnable")
+	assert.Nil(t, rootCmd.Run, "RunE, not Run: startup failures must be errors")
+
+	want := reflect.ValueOf(runStdio).Pointer()
+	assert.Equal(t, want, reflect.ValueOf(rootCmd.RunE).Pointer(),
+		"the bare invocation must run stdio")
+	assert.Equal(t, want, reflect.ValueOf(stdioCmd.RunE).Pointer(),
+		"`loki-mcp stdio` must stay identical to the bare invocation")
+}
+
+// TestBareInvocationServes pins the observable half of the same fix: with no
+// subcommand the binary enters the serving path — proven here by the Loki
+// connectivity check failing — instead of printing help and exiting 0.
+func TestBareInvocationServes(t *testing.T) {
+	isolateViper(t)
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	viper.Set("url", closedLokiAddr(t))
+
+	out, _, err := executeRoot(t)
+
+	require.Error(t, err, "a bare invocation must not exit 0 having started nothing")
+	assert.Contains(t, err.Error(), "loki connectivity check failed: ")
+	assert.NotContains(t, out, "Use subcommands to pick a mode explicitly",
+		"the long help is not the bare invocation's output any more")
+}
+
+// TestUnknownSubcommandStillFails pins that making the root runnable did not
+// turn a typo into a silently started stdio server.
+func TestUnknownSubcommandStillFails(t *testing.T) {
+	isolateViper(t)
+
+	_, _, err := executeRoot(t, "nosuchcommand")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown command "nosuchcommand" for "loki-mcp"`)
+}
+
+// executeRoot runs the root command with args and returns what cobra wrote
+// through its out writer (command output and the usage block) and its err
+// writer (the "Error: …" line), restoring the mutated command state
+// afterwards.
+//
+// The empty argument list is passed as a non-nil slice on purpose: cobra falls
+// back to os.Args when SetArgs was given nil, which under `go test` means the
+// test binary's own flags.
+func executeRoot(t *testing.T, args ...string) (out, errOut string, err error) {
 	t.Helper()
 
 	prev := handlerConfig
@@ -219,9 +268,16 @@ func executeRoot(t *testing.T, args ...string) error {
 		rootCmd.SetErr(nil)
 	})
 
-	rootCmd.SetArgs(args)
-	rootCmd.SetOut(io.Discard)
-	rootCmd.SetErr(io.Discard)
+	if args == nil {
+		args = []string{}
+	}
 
-	return rootCmd.Execute()
+	var outBuf, errBuf bytes.Buffer
+	rootCmd.SetArgs(args)
+	rootCmd.SetOut(&outBuf)
+	rootCmd.SetErr(&errBuf)
+
+	err = rootCmd.Execute()
+
+	return outBuf.String(), errBuf.String(), err
 }
