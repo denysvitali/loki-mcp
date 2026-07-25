@@ -45,13 +45,11 @@ const defaultShutdownTimeout = 5 * time.Second
 // http.Server.Shutdown reported. RunHTTP always flushes telemetry before
 // returning, on every path including the error ones.
 //
-// Shutdown is not a full graceful drain. The 5s defaultShutdownTimeout is an
-// upper bound derived from an already-cancelled context, so in-flight requests
-// — an open /sse stream, a slow /stream call — are dropped immediately and
-// RunHTTP returns context.Canceled rather than nil. On an idle server the same
-// path returns nil, which is why the defect is easy to miss. FINDINGS.md §7
-// has the reproduction and the one-line fix, deliberately not applied here
-// because it changes the process exit status on an ordinary SIGTERM.
+// Shutdown is a real graceful drain: in-flight requests get up to
+// defaultShutdownTimeout (5s) to finish before the process gives up, and a
+// signalled shutdown that completes inside that budget returns nil. Only a
+// drain that genuinely outlives the budget returns an error, and it is
+// context.DeadlineExceeded.
 //
 // The deferred calls run last-in-first-out: stop() detaches the signal
 // handler (and ends the goroutine signal.NotifyContext owns) before
@@ -136,13 +134,20 @@ func serve(ctx context.Context, srv *http.Server, cfg HTTPConfig) error {
 
 	// Gracefully shutdown HTTP server.
 	//
-	// ctx is already done here (it is what woke the select), so shutdownCtx
-	// inherits that cancellation and defaultShutdownTimeout is an upper bound
-	// only. This matches the pre-refactor behaviour, which derived the
-	// shutdown context from a context it had just cancelled.
-	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, defaultShutdownTimeout)
+	// The parent is context.Background(), not ctx: ctx is already done here
+	// (being done is what woke the select), so deriving from it would hand
+	// Shutdown a context that is cancelled the instant it is created and the
+	// grace period would never apply. Rooting the timeout at Background is
+	// what makes defaultShutdownTimeout a real budget rather than dead code.
+	//
+	// Consequence for long-lived streams: a client holding /sse open across
+	// the signal never lets its connection go idle, so Shutdown waits out the
+	// full 5s and then returns context.DeadlineExceeded. That is the intended
+	// trade — bounded drain, then give up — not a bug.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
 	defer shutdownCancel()
 
+	//nolint:contextcheck // not inheriting ctx is the whole point: ctx is done, so a derived shutdown context would expire before Shutdown ever polled it (FINDINGS.md §7).
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logging.Errorf("HTTP server shutdown error: %v", err)
 		return err
