@@ -78,12 +78,14 @@ func (c *LokiHTTPClient) ListLabelNamesWithQuery(ctx context.Context, query stri
 // selector, nanosecond timestamps, and non-200 responses turned into errors
 // carrying the status and the body.
 //
-// labelName is percent-escaped into the path and then escaped a second time
-// when the URL is rendered, so a name containing a character that needs
-// escaping is sent doubly encoded (FINDINGS.md §10). Real Loki label names are
-// [a-zA-Z_][a-zA-Z0-9_]*, so nothing that needs escaping normally gets here.
+// labelName is interpolated raw and escaped exactly once, by url.URL.String
+// when the request URL is rendered: url.URL.Path holds the *decoded* path, so
+// pre-escaping it here would encode it twice (FINDINGS.md §10). A "/" in a
+// label name is therefore sent as a path separator rather than %2F; real Loki
+// label names are [a-zA-Z_][a-zA-Z0-9_]*, so nothing that needs escaping
+// normally gets here.
 func (c *LokiHTTPClient) ListLabelValuesWithQuery(ctx context.Context, labelName, query string, start, end time.Time) (*loghttp.LabelResponse, error) {
-	path := fmt.Sprintf("/loki/api/v1/label/%s/values", url.PathEscape(labelName))
+	path := fmt.Sprintf("/loki/api/v1/label/%s/values", labelName)
 	return c.fetchLabels(ctx, path, query, start, end)
 }
 

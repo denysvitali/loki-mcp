@@ -15,10 +15,11 @@ import (
 
 // capturedRequest records what the fake Loki server saw.
 type capturedRequest struct {
-	path  string
-	query url.Values
-	auth  string
-	orgID string
+	path    string
+	rawPath string
+	query   url.Values
+	auth    string
+	orgID   string
 }
 
 // newFakeLoki serves body with status for every request and records the last one.
@@ -28,6 +29,7 @@ func newFakeLoki(t *testing.T, status int, body string) (*httptest.Server, *capt
 	captured := &capturedRequest{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured.path = r.URL.Path
+		captured.rawPath = r.URL.EscapedPath()
 		captured.query = r.URL.Query()
 		captured.auth = r.Header.Get("Authorization")
 		captured.orgID = r.Header.Get("X-Scope-OrgID")
@@ -52,34 +54,44 @@ func TestLokiHTTPClient_Paths(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		call     func(c *LokiHTTPClient) (*loghttp.LabelResponse, error)
-		wantPath string
+		name        string
+		call        func(c *LokiHTTPClient) (*loghttp.LabelResponse, error)
+		wantPath    string
+		wantRawPath string
 	}{
 		{
 			name: "label names",
 			call: func(c *LokiHTTPClient) (*loghttp.LabelResponse, error) {
 				return c.ListLabelNamesWithQuery(context.Background(), "", testStart, testEnd)
 			},
-			wantPath: "/loki/api/v1/labels",
+			wantPath:    "/loki/api/v1/labels",
+			wantRawPath: "/loki/api/v1/labels",
 		},
 		{
+			// An ordinary label name is byte-identical on the wire before and
+			// after the escaping fix below.
 			name: "label values",
 			call: func(c *LokiHTTPClient) (*loghttp.LabelResponse, error) {
 				return c.ListLabelValuesWithQuery(context.Background(), "job", "", testStart, testEnd)
 			},
-			wantPath: "/loki/api/v1/label/job/values",
+			wantPath:    "/loki/api/v1/label/job/values",
+			wantRawPath: "/loki/api/v1/label/job/values",
 		},
 		{
-			// Characterization only: the label name is escaped with
-			// url.PathEscape and then assigned to url.URL.Path, which escapes
-			// it a second time on the wire. The server therefore decodes the
-			// singly-escaped form rather than the literal label name.
-			name: "label values double-escapes the label name",
+			// The label name is interpolated raw and escaped exactly once, by
+			// url.URL.String. The server therefore decodes the literal label
+			// name back out. Previously this asserted the double-escaped
+			// "/loki/api/v1/label/we%2Fird%20name/values" (FINDINGS.md §10).
+			//
+			// "/" is a path separator in url.URL.Path, so it is not escaped;
+			// only the space is. Loki label names are [a-zA-Z_][a-zA-Z0-9_]*,
+			// so neither character reaches here in practice.
+			name: "label values escapes the label name exactly once",
 			call: func(c *LokiHTTPClient) (*loghttp.LabelResponse, error) {
 				return c.ListLabelValuesWithQuery(context.Background(), "we/ird name", "", testStart, testEnd)
 			},
-			wantPath: "/loki/api/v1/label/we%2Fird%20name/values",
+			wantPath:    "/loki/api/v1/label/we/ird name/values",
+			wantRawPath: "/loki/api/v1/label/we/ird%20name/values",
 		},
 	}
 
@@ -97,9 +109,13 @@ func TestLokiHTTPClient_Paths(t *testing.T) {
 			if len(resp.Data) != 2 || resp.Data[0] != "job" {
 				t.Errorf("unexpected decoded response: %+v", resp.Data)
 			}
-			// captured.path is the server-side decoded path.
+			// captured.path is the server-side decoded path;
+			// captured.rawPath is what actually went over the wire.
 			if captured.path != tt.wantPath {
 				t.Errorf("path = %q, want %q", captured.path, tt.wantPath)
+			}
+			if captured.rawPath != tt.wantRawPath {
+				t.Errorf("raw path = %q, want %q", captured.rawPath, tt.wantRawPath)
 			}
 		})
 	}
