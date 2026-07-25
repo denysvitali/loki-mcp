@@ -350,6 +350,94 @@ func TestHandleLokiQuery_PostProcessing(t *testing.T) {
 	}
 }
 
+// singleStreamBody is a canned query_range response for one stream, written
+// newest-first the way Loki answers a logproto.BACKWARD query.
+const singleStreamBody = `{
+  "status": "success",
+  "data": {
+    "resultType": "streams",
+    "result": [
+      {
+        "stream": {"job": "api"},
+        "values": [
+          ["1705312803000000000", "fourth (newest)"],
+          ["1705312802000000000", "third"],
+          ["1705312801000000000", "second"],
+          ["1705312800000000000", "first (oldest)"]
+        ]
+      }
+    ],
+    "stats": {}
+  }
+}`
+
+// TestHandleLokiQuery_OrderIsNewestFirst pins that the emitted order matches
+// the BACKWARD direction the query asks for, whether or not post-processing
+// runs. Enabling the secret filter must not reorder anything.
+func TestHandleLokiQuery_OrderIsNewestFirst(t *testing.T) {
+	newestFirst := []string{"fourth (newest)", "third", "second", "first (oldest)"}
+
+	// Not parallel: newTestConfig(t, _, true) builds a detector.
+	tests := []struct {
+		name         string
+		secretFilter bool
+		args         map[string]any
+		want         []string
+	}{
+		{
+			name: "no post-processing keeps Loki's order",
+			want: newestFirst,
+		},
+		{
+			name:         "secret filtering does not reorder",
+			secretFilter: true,
+			want:         newestFirst,
+		},
+		{
+			// "third" is the only line without an "e".
+			name: "keyword filter keeps the survivors newest-first",
+			args: map[string]any{"filter": "e"},
+			want: []string{"fourth (newest)", "second", "first (oldest)"},
+		},
+		{
+			name: "head returns the oldest entries, newest first",
+			args: map[string]any{"head": float64(2)},
+			want: []string{"second", "first (oldest)"},
+		},
+		{
+			name: "tail returns the newest entries, newest first",
+			args: map[string]any{"tail": float64(2)},
+			want: []string{"fourth (newest)", "third"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := newFakeQueryLoki(t, singleStreamBody)
+			args := map[string]any{"query": `{job="api"}`, "url": srv.URL}
+			for k, v := range tt.args {
+				args[k] = v
+			}
+
+			h := New(newTestConfig(t, "", tt.secretFilter))
+			res, err := h.HandleQuery(context.Background(), queryRequest(args))
+			if err != nil {
+				t.Fatalf("HandleQuery returned error: %v", err)
+			}
+
+			got := strings.Split(strings.TrimSuffix(resultText(t, res), "\n"), "\n")
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d lines, want %d:\n%s", len(got), len(tt.want), strings.Join(got, "\n"))
+			}
+			for i, want := range tt.want {
+				if !strings.HasSuffix(got[i], " "+want) {
+					t.Errorf("line %d = %q, want it to end with %q", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
 // TestHandleLokiQuery_HeadTailRejected pins the mutual-exclusion error.
 func TestHandleLokiQuery_HeadTailRejected(t *testing.T) {
 	t.Parallel()

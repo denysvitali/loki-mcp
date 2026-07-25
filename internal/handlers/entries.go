@@ -64,7 +64,15 @@ type logEntry struct {
 	Labels    loghttp.LabelSet
 }
 
-// collectAndSortEntries merges entries from all streams and sorts them by timestamp (oldest first)
+// collectAndSortEntries merges entries from all streams and sorts them newest
+// first, matching the logproto.BACKWARD direction the range query asks Loki
+// for. Post-processing therefore preserves the ordering a client would see if
+// it were skipped entirely.
+//
+// sort.Slice is not stable, so entries sharing a timestamp are broken apart by
+// line and then by label-set string. That makes the result a function of the
+// input alone: equal-timestamp entries cannot reorder between two runs on the
+// same data.
 func collectAndSortEntries(streams loghttp.Streams) []logEntry {
 	var entries []logEntry
 	for _, stream := range streams {
@@ -77,9 +85,15 @@ func collectAndSortEntries(streams loghttp.Streams) []logEntry {
 		}
 	}
 
-	// Sort by timestamp ascending (oldest first)
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Timestamp.Before(entries[j].Timestamp)
+		a, b := entries[i], entries[j]
+		if !a.Timestamp.Equal(b.Timestamp) {
+			return a.Timestamp.After(b.Timestamp)
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		return a.Labels.String() < b.Labels.String()
 	})
 
 	return entries
@@ -106,11 +120,12 @@ func filterEntries(entries []logEntry, filter string, caseSensitive bool) []logE
 	return filtered
 }
 
-// applyHeadTail returns the first head entries or the last tail entries,
-// against the ascending order collectAndSortEntries produced — so head is the
-// oldest and tail the newest. A count at or above len(entries), or a
-// non-positive one, returns entries unchanged, and the result always aliases
-// the input slice rather than copying.
+// applyHeadTail returns the head oldest or the tail newest entries, keeping
+// the newest-first order collectAndSortEntries produced. Because that order is
+// descending, head slices off the end and tail off the front — the mirror of
+// what the names suggest. A count at or above len(entries), or a non-positive
+// one, returns entries unchanged, and the result always aliases the input
+// slice rather than copying.
 //
 // head wins if both are positive. The query handler rejects that combination
 // before it gets here, so the precedence is a fallback, not a contract.
@@ -123,14 +138,14 @@ func applyHeadTail(entries []logEntry, head, tail int) []logEntry {
 		if head >= len(entries) {
 			return entries
 		}
-		return entries[:head]
+		return entries[len(entries)-head:]
 	}
 
 	if tail > 0 {
 		if tail >= len(entries) {
 			return entries
 		}
-		return entries[len(entries)-tail:]
+		return entries[:tail]
 	}
 
 	return entries
