@@ -31,7 +31,12 @@ func New(version string, cfg handlers.Config) *server.MCPServer {
 
 	h := handlers.New(cfg)
 
-	s.AddTool(h.QueryTool(), h.HandleQuery)
+	queryTool := h.QueryTool()
+	if len(cfg.QueryFilter) > 0 {
+		queryTool.Description += " The configured query filter is enforced on every call."
+	}
+
+	s.AddTool(queryTool, h.HandleQuery)
 	s.AddTool(h.LabelNamesTool(), h.HandleLabelNames)
 	s.AddTool(h.LabelValuesTool(), h.HandleLabelValues)
 

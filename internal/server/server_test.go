@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,6 +28,51 @@ func TestNewRegistersExactlyThreeTools(t *testing.T) {
 	assert.Contains(t, tools, "loki_query")
 	assert.Contains(t, tools, "loki_label_names")
 	assert.Contains(t, tools, "loki_label_values")
+}
+
+// TestNew_QueryToolExposureAndFilter pins the client-facing availability of
+// loki_query: the registered tool must be callable directly and must enforce
+// the configured stream selector before the request reaches Loki.
+func TestNew_QueryToolExposureAndFilter(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := handlers.NewConfig(`{namespace="prod"}`, false)
+	require.NoError(t, err)
+
+	captured := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case captured <- r.URL.Query().Get("query"):
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := New("test-version", cfg)
+	queryTool := s.GetTool("loki_query")
+	require.NotNil(t, queryTool)
+	assert.Contains(t, queryTool.Tool.Description, "configured query filter is enforced")
+
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "loki_query"
+	request.Params.Arguments = map[string]any{
+		"query": `{job="api"}`,
+		"url":   srv.URL,
+	}
+
+	result, err := queryTool.Handler(t.Context(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.IsError)
+
+	select {
+	case got := <-captured:
+		assert.Equal(t, `{namespace="prod", job="api"}`, got)
+	default:
+		t.Fatal("registered query tool did not call Loki")
+	}
 }
 
 // routePattern reports the ServeMux pattern that path resolves to, or "" when
