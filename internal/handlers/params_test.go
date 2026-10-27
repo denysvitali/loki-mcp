@@ -1,7 +1,14 @@
 package handlers
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -114,5 +121,75 @@ func TestNewLokiClient(t *testing.T) {
 	}
 	if c.OrgID != params.Org {
 		t.Errorf("OrgID = %q, want %q", c.OrgID, params.Org)
+	}
+}
+
+func TestPingLokiTimeout(t *testing.T) {
+	for _, bodyStarted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("body_started=%t", bodyStarted), func(t *testing.T) {
+			canceled := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if bodyStarted {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"status":"success","data":[`))
+					w.(http.Flusher).Flush()
+				}
+				<-r.Context().Done()
+				close(canceled)
+			}))
+			defer srv.Close()
+			started := time.Now()
+			err := pingLokiWithTimeout(&LokiParams{URL: srv.URL}, 100*time.Millisecond)
+			if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("expected wrapped deadline error, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "failed to reach Loki at "+srv.URL) {
+				t.Fatalf("missing startup error context: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed > 2*time.Second {
+				t.Fatalf("ping exceeded bounded timeout: %s", elapsed)
+			}
+			select {
+			case <-canceled:
+			case <-time.After(2 * time.Second):
+				t.Fatal("request was not canceled")
+			}
+		})
+	}
+}
+
+func TestPingLokiRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name, username, password, token, authorization string
+		status                                         int
+	}{
+		{name: "empty labels", status: http.StatusOK},
+		{name: "basic auth", username: "user", password: "pass", authorization: "Basic dXNlcjpwYXNz", status: http.StatusOK},
+		{name: "bearer auth", token: "token", authorization: "Bearer token", status: http.StatusOK},
+		{name: "rejected auth", token: "token", authorization: "Bearer token", status: http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/loki/api/v1/labels" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				if got := r.Header.Get("Authorization"); got != tc.authorization {
+					t.Errorf("authorization = %q, want %q", got, tc.authorization)
+				}
+				if r.Header.Get("X-Scope-OrgID") != "tenant" {
+					t.Error("missing tenant header")
+				}
+				if r.URL.Query().Get("start") == "" || r.URL.Query().Get("end") == "" {
+					t.Error("missing time range")
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+			}))
+			defer srv.Close()
+			err := PingLoki(&LokiParams{URL: srv.URL, Username: tc.username, Password: tc.password, Token: tc.token, Org: "tenant"})
+			if (err != nil) != (tc.status != http.StatusOK) {
+				t.Fatalf("PingLoki returned %v for status %d", err, tc.status)
+			}
+		})
 	}
 }

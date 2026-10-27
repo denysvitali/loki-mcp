@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/grafana/loki/v3/pkg/logcli/client"
@@ -22,18 +24,42 @@ import (
 // from Loki having labels, and that is deliberate — this is a liveness probe,
 // not a data check.
 //
-// PingLoki takes no context and has no deadline of its own. The logcli client
-// explicitly sets its http.Client.Timeout to 0, and DefaultHTTPTimeout applies
-// to LokiHTTPClient only, so an unresponsive Loki that accepts the connection
-// but never answers will block this call indefinitely.
+// PingLoki bounds connection setup and response body reads by DefaultHTTPTimeout.
 func PingLoki(params *LokiParams) error {
+	return pingLokiWithTimeout(params, DefaultHTTPTimeout)
+}
+
+func pingLokiWithTimeout(params *LokiParams, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	lokiClient := newLokiClient(params)
+	// logcli explicitly disables http.Client.Timeout and exposes no context
+	// argument. Attach the deadline to its request, keeping the original
+	// transport, URL construction and authentication behavior.
+	lokiClient.Tripperware = func(next http.RoundTripper) http.RoundTripper {
+		return pingRoundTripper(func(req *http.Request) (*http.Response, error) {
+			return next.RoundTrip(req.Clone(ctx))
+		})
+	}
 	now := time.Now()
 	_, err := lokiClient.ListLabelNames(true, now.Add(-time.Minute), now)
 	if err != nil {
+		// logcli replaces transport failures with an attempts-exhausted error.
+		// Preserve the deadline cause so startup reports a useful timeout.
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		return fmt.Errorf("failed to reach Loki at %s: %w", params.URL, err)
 	}
 	return nil
+}
+
+// pingRoundTripper adapts a function to logcli's transport middleware.
+type pingRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f pingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // Defaults applied when a tool call leaves the corresponding argument unset.
@@ -42,9 +68,8 @@ func PingLoki(params *LokiParams) error {
 // be updated with them.
 const (
 	// DefaultHTTPTimeout bounds a single LokiHTTPClient request end to end,
-	// connection through body. It applies only to the two label endpoints
-	// reached through LokiHTTPClient; the logcli client used for query_range
-	// and for PingLoki sets no timeout at all.
+	// connection through body. It also bounds the startup PingLoki check.
+	// The logcli client used for query_range sets no timeout.
 	DefaultHTTPTimeout = 30 * time.Second
 	// DefaultQueryLimit is the maximum number of entries requested from Loki
 	// when the caller passes no positive limit. A zero or negative limit is
