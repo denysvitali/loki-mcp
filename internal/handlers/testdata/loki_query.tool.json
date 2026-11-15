@@ -1,0 +1,81 @@
+{
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true
+  },
+  "description": "Run a LogQL query against Grafana Loki and return matching log entries. Results are post-processed (keyword filter, secret filtering, head/tail) and rendered in the requested format.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "direction": {
+        "default": "backward",
+        "description": "Query direction sent to Loki: \"backward\" (newest first, default) or \"forward\" (oldest first).",
+        "type": "string"
+      },
+      "end": {
+        "description": "End of the query window. Same formats as start. Default: now.",
+        "type": "string"
+      },
+      "filter": {
+        "description": "Optional local substring filter applied to each log line before head/tail limiting.",
+        "type": "string"
+      },
+      "filter_case_sensitive": {
+        "description": "When true, the local substring filter is case-sensitive (default: false).",
+        "type": "boolean"
+      },
+      "format": {
+        "default": "raw",
+        "description": "Output format: \"raw\" (one line per entry, default), \"json\" (Loki API-shaped streams response), or \"text\" (human-readable grouped listing).",
+        "type": "string"
+      },
+      "head": {
+        "description": "After filtering, keep only the N oldest matching entries (by timestamp) and render them newest-first. Cannot be used with tail.",
+        "type": "number"
+      },
+      "limit": {
+        "description": "Maximum number of log entries requested from Loki before local post-processing (default: 100). Use head/tail to limit after filtering.",
+        "type": "number"
+      },
+      "org": {
+        "description": "Organization/tenant ID for the query, sent as X-Scope-OrgID (env: LOKI_ORG_ID)",
+        "type": "string"
+      },
+      "password": {
+        "description": "Password for basic authentication (env: LOKI_PASSWORD)",
+        "type": "string"
+      },
+      "query": {
+        "description": "LogQL log query string (for example: {app=\"api\"} |= \"error\")",
+        "type": "string"
+      },
+      "start": {
+        "description": "Start of the query window. Accepts \"now\", negative durations like \"-1h\" or \"-30m\", RFC3339, or \"2006-01-02T15:04:05\" / \"2006-01-02 15:04:05\" / \"2006-01-02\" (parsed as UTC). Default: 1h ago.",
+        "type": "string"
+      },
+      "tail": {
+        "description": "After filtering, keep only the N newest matching entries and render them newest-first. Cannot be used with head.",
+        "type": "number"
+      },
+      "token": {
+        "description": "Bearer token for authentication (env: LOKI_TOKEN)",
+        "type": "string"
+      },
+      "url": {
+        "default": "http://loki.example:3100",
+        "description": "Loki server URL (env: LOKI_URL)",
+        "type": "string"
+      },
+      "username": {
+        "description": "Username for basic authentication (env: LOKI_USERNAME)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "name": "loki_query"
+}

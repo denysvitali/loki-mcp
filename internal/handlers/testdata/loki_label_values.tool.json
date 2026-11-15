@@ -1,0 +1,56 @@
+{
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true
+  },
+  "description": "List values for a specific label in Grafana Loki within the given time range.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "end": {
+        "description": "End of the query window. Same formats as start. Default: now.",
+        "type": "string"
+      },
+      "format": {
+        "default": "raw",
+        "description": "Output format: \"raw\" (one value per line, default), \"json\", or \"text\" (numbered list).",
+        "type": "string"
+      },
+      "label": {
+        "description": "Label name to retrieve values for (for example: \"app\", \"namespace\", \"job\")",
+        "type": "string"
+      },
+      "org": {
+        "description": "Organization/tenant ID for the query, sent as X-Scope-OrgID (env: LOKI_ORG_ID)",
+        "type": "string"
+      },
+      "password": {
+        "description": "Password for basic authentication (env: LOKI_PASSWORD)",
+        "type": "string"
+      },
+      "start": {
+        "description": "Start of the query window. Accepts \"now\", negative durations like \"-1h\", RFC3339, or \"2006-01-02T15:04:05\" / \"2006-01-02 15:04:05\" / \"2006-01-02\" (parsed as UTC). Default: 1h ago.",
+        "type": "string"
+      },
+      "token": {
+        "description": "Bearer token for authentication (env: LOKI_TOKEN)",
+        "type": "string"
+      },
+      "url": {
+        "default": "http://loki.example:3100",
+        "description": "Loki server URL (env: LOKI_URL)",
+        "type": "string"
+      },
+      "username": {
+        "description": "Username for basic authentication (env: LOKI_USERNAME)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "label"
+    ]
+  },
+  "name": "loki_label_values"
+}
